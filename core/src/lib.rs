@@ -8,3 +8,6 @@ pub mod types;
 pub use precompute::*;
 pub use store::Store;
 pub use types::*;
+
+#[cfg(test)]
+mod tests;
