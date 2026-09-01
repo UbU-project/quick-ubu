@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
 
+use crate::plan::{ComputeTarget, Plan, PlanAuthority};
+use crate::planning::{re_plan, DeterministicPlacer};
 use crate::precompute::{
     affect_violations, resolve_preferences, topo_order, AffectBudget, AffectViolation, WindowKey,
 };
@@ -810,4 +812,338 @@ fn every_precompute_function_is_deterministic_on_one_store() {
             tasks: vec![id(1), id(2), id(3)],
         }])
     );
+}
+
+// ---------------------------------------------------------------- planning --
+
+fn entry<'a>(plan: &'a Plan, task_id: Id) -> &'a crate::ScheduleEntry {
+    plan.entries
+        .iter()
+        .find(|entry| entry.item == task_id)
+        .expect("task must have an entry")
+}
+
+fn assert_no_overlaps(plan: &Plan) {
+    for (index, left) in plan.entries.iter().enumerate() {
+        for right in plan.entries.iter().skip(index + 1) {
+            assert!(
+                left.window.end <= right.window.start || right.window.end <= left.window.start,
+                "entries overlap: {left:?} and {right:?}"
+            );
+        }
+    }
+}
+
+fn fixed_handle(n: u128, start: i64, end: i64) -> Handle {
+    Handle {
+        id: id(n),
+        window: Some(TimeWindow {
+            start: at(start),
+            end: at(end),
+        }),
+        duration: chrono::Duration::seconds(end - start),
+        status: HandleStatus::Scheduled,
+        deferrable: true,
+    }
+}
+
+#[test]
+fn desktop_ollama_builds_a_full_precedence_safe_plan_with_etas() {
+    let mut store = Store::new();
+    store.upsert_objective(objective(100));
+    store.upsert_objective(objective(101));
+    store.upsert_task(Task {
+        objective_ids: vec![id(100)],
+        est_duration: chrono::Duration::hours(1),
+        ..task(1)
+    });
+    store.upsert_task(Task {
+        objective_ids: vec![id(100)],
+        est_duration: chrono::Duration::minutes(30),
+        status: TaskStatus::Scheduled,
+        ..blocked(2, &[1])
+    });
+    store.upsert_task(Task {
+        tier: Tier::TopSecret,
+        objective_ids: vec![id(101)],
+        est_duration: chrono::Duration::minutes(45),
+        ..blocked(3, &[2])
+    });
+
+    let plan = re_plan(
+        &store,
+        ComputeTarget::DesktopOllama,
+        at(50),
+        at(0),
+        &[],
+        &AffectBudget { cap: 10 },
+        &DeterministicPlacer,
+    )
+    .expect("valid store");
+
+    assert_eq!(plan.created_at, at(50));
+    assert_eq!(plan.authority, PlanAuthority::Authoritative);
+    assert_eq!(plan.clearance, Tier::TopSecret);
+    assert_eq!(
+        plan.entries.iter().map(|entry| entry.item).collect::<BTreeSet<_>>(),
+        [id(1), id(2), id(3)].into_iter().collect()
+    );
+    assert!(entry(&plan, id(2)).window.start >= entry(&plan, id(1)).window.end);
+    assert!(entry(&plan, id(3)).window.start >= entry(&plan, id(2)).window.end);
+    assert_no_overlaps(&plan);
+    assert_eq!(plan.objective_etas[&id(100)], Some(entry(&plan, id(2)).window.end));
+    assert_eq!(plan.objective_etas[&id(101)], Some(entry(&plan, id(3)).window.end));
+    assert!(plan.conflicts.is_empty());
+}
+
+#[test]
+fn hosted_llm_uses_fixed_blocks_and_conflicts_hidden_precedence() {
+    let mut store = Store::new();
+    store.upsert_task(Task {
+        tier: Tier::TopSecret,
+        ..task(1)
+    });
+    store.upsert_task(Task {
+        tier: Tier::SemiPublic,
+        est_duration: chrono::Duration::minutes(90),
+        ..blocked(2, &[1])
+    });
+    store.upsert_task(Task {
+        tier: Tier::UserShared,
+        ..task(3)
+    });
+    store.upsert_task(Task {
+        tier: Tier::SemiPublic,
+        ..blocked(4, &[3])
+    });
+    store.upsert_task(Task {
+        tier: Tier::SemiPublic,
+        est_duration: chrono::Duration::minutes(30),
+        ..task(5)
+    });
+    store.upsert_task(Task {
+        tier: Tier::SemiPublic,
+        ..blocked(6, &[4])
+    });
+    let fixed = fixed_handle(1, 3_600, 7_200);
+
+    let plan = re_plan(
+        &store,
+        ComputeTarget::HostedLlm,
+        at(10),
+        at(0),
+        std::slice::from_ref(&fixed),
+        &AffectBudget { cap: 10 },
+        &DeterministicPlacer,
+    )
+    .expect("valid store");
+
+    assert_eq!(plan.authority, PlanAuthority::Provisional);
+    assert_eq!(plan.clearance, Tier::SemiPublic);
+    assert!(!plan.entries.iter().any(|entry| [id(1), id(3)].contains(&entry.item)));
+    assert!(entry(&plan, id(5)).window.end <= fixed.window.as_ref().unwrap().start);
+    assert!(entry(&plan, id(2)).window.start >= fixed.window.as_ref().unwrap().end);
+    for planned in &plan.entries {
+        let occupied = fixed.window.as_ref().unwrap();
+        assert!(planned.window.end <= occupied.start || occupied.end <= planned.window.start);
+    }
+    assert!(!plan.entries.iter().any(|entry| entry.item == id(4)));
+    assert!(plan.conflicts.contains(&crate::Conflict {
+        item: id(4),
+        reason: "unresolved hidden precedence".to_string(),
+    }));
+    assert!(plan.conflicts.contains(&crate::Conflict {
+        item: id(6),
+        reason: "predecessor unplaced".to_string(),
+    }));
+}
+
+#[test]
+fn affect_budget_separates_days_and_rejects_an_intrinsically_costly_task() {
+    let store = store_with_tasks(vec![costed(1, 6), costed(2, 6), costed(3, 11)]);
+    let budget = AffectBudget { cap: 10 };
+    let plan = re_plan(
+        &store,
+        ComputeTarget::DesktopOllama,
+        at(0),
+        at(0),
+        &[],
+        &budget,
+        &DeterministicPlacer,
+    )
+    .expect("valid store");
+
+    assert_ne!(
+        entry(&plan, id(1)).window.start.date_naive(),
+        entry(&plan, id(2)).window.start.date_naive()
+    );
+    assert!(!plan.entries.iter().any(|entry| entry.item == id(3)));
+    assert!(plan.conflicts.contains(&crate::Conflict {
+        item: id(3),
+        reason: "affect_cost exceeds daily budget".to_string(),
+    }));
+
+    let mut by_day: BTreeMap<WindowKey, Vec<Id>> = BTreeMap::new();
+    for planned in &plan.entries {
+        by_day
+            .entry(planned.window.start.date_naive().to_string())
+            .or_default()
+            .push(planned.item);
+    }
+    assert_eq!(affect_violations(&by_day, &store, &budget), Ok(Vec::new()));
+}
+
+#[test]
+fn due_date_conflict_keeps_the_late_entry() {
+    let store = store_with_tasks(vec![Task {
+        est_duration: chrono::Duration::hours(2),
+        due: Some(at(3_600)),
+        ..task(1)
+    }]);
+    let plan = re_plan(
+        &store,
+        ComputeTarget::DesktopOllama,
+        at(0),
+        at(0),
+        &[],
+        &AffectBudget { cap: 10 },
+        &DeterministicPlacer,
+    )
+    .expect("valid store");
+
+    assert_eq!(entry(&plan, id(1)).window.end, at(7_200));
+    assert!(plan.conflicts.contains(&crate::Conflict {
+        item: id(1),
+        reason: "placed after due date".to_string(),
+    }));
+}
+
+#[test]
+fn re_plan_propagates_dependency_cycles() {
+    let store = store_with_tasks(vec![blocked(1, &[2]), blocked(2, &[1])]);
+    assert!(matches!(
+        re_plan(
+            &store,
+            ComputeTarget::DesktopOllama,
+            at(0),
+            at(0),
+            &[],
+            &AffectBudget { cap: 10 },
+            &DeterministicPlacer,
+        ),
+        Err(CoreError::DependencyCycle { involved }) if involved == vec![id(1), id(2)]
+    ));
+}
+
+proptest! {
+    #[test]
+    fn prop_desktop_plans_are_safe_and_deterministic(
+        graph in acyclic_graph(),
+        cost_seeds in proptest::collection::vec(0u8..21, 1..9),
+        durations in proptest::collection::vec(1i64..181, 1..9),
+        cap in 1i32..21,
+    ) {
+        let mut store = store_from_graph(&graph);
+        for (index, task) in store.tasks.values_mut().enumerate() {
+            task.affect_cost = i32::from(cost_seeds[index % cost_seeds.len()]) % (cap + 1);
+            task.est_duration = chrono::Duration::minutes(durations[index % durations.len()]);
+        }
+        let budget = AffectBudget { cap };
+        let first = re_plan(
+            &store,
+            ComputeTarget::DesktopOllama,
+            at(123),
+            at(0),
+            &[],
+            &budget,
+            &DeterministicPlacer,
+        ).expect("constructed acyclic store");
+        let second = re_plan(
+            &store,
+            ComputeTarget::DesktopOllama,
+            at(123),
+            at(0),
+            &[],
+            &budget,
+            &DeterministicPlacer,
+        ).expect("second run");
+
+        prop_assert_eq!(
+            (&first.entries, &first.conflicts, &first.objective_etas),
+            (&second.entries, &second.conflicts, &second.objective_etas)
+        );
+        prop_assert_eq!(first.entries.len(), graph.len());
+
+        let planned: BTreeMap<Id, &crate::ScheduleEntry> =
+            first.entries.iter().map(|entry| (entry.item, entry)).collect();
+        for task in store.tasks.values() {
+            for predecessor in &task.blocked_by {
+                prop_assert!(planned[predecessor].window.end <= planned[&task.id].window.start);
+            }
+        }
+        for (index, left) in first.entries.iter().enumerate() {
+            for right in first.entries.iter().skip(index + 1) {
+                prop_assert!(
+                    left.window.end <= right.window.start || right.window.end <= left.window.start
+                );
+            }
+        }
+
+        let mut by_day: BTreeMap<WindowKey, Vec<Id>> = BTreeMap::new();
+        for planned in &first.entries {
+            by_day
+                .entry(planned.window.start.date_naive().to_string())
+                .or_default()
+                .push(planned.item);
+        }
+        prop_assert!(
+            affect_violations(&by_day, &store, &budget)
+                .expect("planned ids exist in the store")
+                .is_empty()
+        );
+    }
+}
+
+proptest! {
+    #[test]
+    fn prop_preference_rank_places_ahead_of_lower_id(
+        base in 1u128..10_000,
+        first_minutes in 1i64..600,
+        second_minutes in 1i64..600,
+    ) {
+        let higher = base + 1;
+        let lower = base;
+        let mut store = store_with_tasks(vec![
+            Task { est_duration: chrono::Duration::minutes(first_minutes), ..task(higher) },
+            Task { est_duration: chrono::Duration::minutes(second_minutes), ..task(lower) },
+        ]);
+        store.upsert_bundle(Bundle {
+            id: id(100_000 + higher),
+            members: [id(higher)].into_iter().collect(),
+        });
+        store.upsert_bundle(Bundle {
+            id: id(100_000 + lower),
+            members: [id(lower)].into_iter().collect(),
+        });
+        store.add_preference(Preference {
+            left: id(100_000 + higher),
+            right: id(100_000 + lower),
+            relation: Relation::Strict,
+        });
+
+        let plan = re_plan(
+            &store,
+            ComputeTarget::DesktopOllama,
+            at(0),
+            at(0),
+            &[],
+            &AffectBudget { cap: 10 },
+            &DeterministicPlacer,
+        ).expect("valid preference");
+
+        prop_assert!(entry(&plan, id(higher)).window.start <= entry(&plan, id(lower)).window.start);
+        prop_assert_eq!(plan.entries[0].item, id(higher));
+        prop_assert_eq!(plan.entries[1].item, id(lower));
+        prop_assert_eq!(plan.entries[1].window.start.date_naive(), at(0).date_naive());
+    }
 }
