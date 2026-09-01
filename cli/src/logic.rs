@@ -216,3 +216,99 @@ fn task_title(store: &Store, id: Id) -> String {
         .map(|task| task.title.clone())
         .unwrap_or_else(|| "<unknown>".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    #[test]
+    fn tier_parsing_accepts_all_kebab_names_and_rejects_garbage() {
+        assert_eq!(parse_tier("semi-public"), Ok(Tier::SemiPublic));
+        assert_eq!(parse_tier("user-shared"), Ok(Tier::UserShared));
+        assert_eq!(parse_tier("top-secret"), Ok(Tier::TopSecret));
+        assert_eq!(
+            parse_tier("garbage"),
+            Err("unknown tier garbage".to_string())
+        );
+    }
+
+    #[test]
+    fn add_then_replan_starts_at_horizon_and_sets_objective_eta() {
+        let mut store = Store::new();
+        let objective_id = objective_add(
+            &mut store,
+            ObjectiveAddInput {
+                title: "Dogfood CLI".to_string(),
+                tier: Tier::UserShared,
+                target_date: None,
+            },
+        );
+        let task_id = add(
+            &mut store,
+            AddInput {
+                title: "Run first loop".to_string(),
+                duration_minutes: 30,
+                tier: Tier::UserShared,
+                affect_cost: 10,
+                due: None,
+                earliest_start: None,
+                objective_prefixes: vec![objective_id.simple().to_string()[..8].to_string()],
+                blocked_by_prefixes: Vec::new(),
+            },
+        )
+        .expect("task should be added");
+        let horizon = fixed_time();
+
+        let output = replan(&store, horizon, horizon, 100).expect("replan should succeed");
+
+        assert_eq!(output.schedule.len(), 1);
+        assert_eq!(output.schedule[0].id, task_id);
+        assert_eq!(output.schedule[0].window.start, horizon);
+        assert_eq!(
+            output.schedule[0].window.end,
+            horizon + Duration::minutes(30)
+        );
+        assert_eq!(output.objective_etas.len(), 1);
+        assert_eq!(
+            output.objective_etas[0].eta,
+            Some(horizon + Duration::minutes(30))
+        );
+        assert!(output.conflicts.is_empty());
+    }
+
+    #[test]
+    fn over_cap_task_is_a_conflict_and_not_scheduled() {
+        let mut store = Store::new();
+        let task_id = add(
+            &mut store,
+            AddInput {
+                title: "Too draining".to_string(),
+                duration_minutes: 30,
+                tier: Tier::UserShared,
+                affect_cost: 101,
+                due: None,
+                earliest_start: None,
+                objective_prefixes: Vec::new(),
+                blocked_by_prefixes: Vec::new(),
+            },
+        )
+        .expect("task should be added");
+        let now = fixed_time();
+
+        let output = replan(&store, now, now, 100).expect("replan should succeed");
+
+        assert!(output.schedule.is_empty());
+        assert_eq!(output.conflicts.len(), 1);
+        assert_eq!(output.conflicts[0].id, task_id);
+        assert_eq!(
+            output.conflicts[0].reason,
+            "affect_cost exceeds daily budget"
+        );
+    }
+
+    fn fixed_time() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 9, 1, 14, 0, 0).single().unwrap()
+    }
+}
