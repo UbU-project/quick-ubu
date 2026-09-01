@@ -1,12 +1,13 @@
 //! Deterministic soft placement behind the [`Planner`] boundary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 
-use crate::plan::{Conflict, ScheduleEntry};
-use crate::precompute::AffectBudget;
-use crate::types::{Id, TimeWindow};
+use crate::plan::{ComputeTarget, Conflict, Plan, PlanAuthority, ScheduleEntry};
+use crate::precompute::{resolve_preferences, topo_order, AffectBudget};
+use crate::store::Store;
+use crate::types::{visible_as_content, CoreError, Handle, Id, TaskStatus, TimeWindow};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Placeable {
@@ -108,6 +109,186 @@ impl Planner for DeterministicPlacer {
 
         PlacementOutput { entries, conflicts }
     }
+}
+
+pub fn re_plan(
+    store: &Store,
+    target: ComputeTarget,
+    planned_at: DateTime<Utc>,
+    horizon_start: DateTime<Utc>,
+    fixed_blocks: &[Handle],
+    budget: &AffectBudget,
+    planner: &dyn Planner,
+) -> Result<Plan, CoreError> {
+    let clearance = target.clearance();
+    let authority = match target {
+        ComputeTarget::DesktopOllama => PlanAuthority::Authoritative,
+        ComputeTarget::HostedLlm => PlanAuthority::Provisional,
+    };
+
+    // These checks deliberately stay outside the planner trait.
+    topo_order(store)?;
+    let preference_classes = resolve_preferences(store)?;
+    let rank: BTreeMap<Id, usize> = preference_classes
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, class)| class.into_iter().map(move |task_id| (task_id, index)))
+        .collect();
+
+    let candidates: BTreeSet<Id> = store
+        .tasks
+        .values()
+        .filter(|task| {
+            matches!(task.status, TaskStatus::Backlog | TaskStatus::Scheduled)
+                && visible_as_content(task.tier, clearance)
+        })
+        .map(|task| task.id)
+        .collect();
+    let order = candidate_order(store, &candidates, &rank);
+
+    let mut items = Vec::new();
+    let mut conflicts = Vec::new();
+    for task_id in order {
+        let task = &store.tasks[&task_id];
+        let mut earliest_floor = task
+            .earliest_start
+            .unwrap_or(horizon_start)
+            .max(horizon_start);
+        let mut sched_predecessors = Vec::new();
+        let mut unresolved_hidden_precedence = false;
+
+        for predecessor_id in &task.blocked_by {
+            let predecessor = &store.tasks[predecessor_id];
+            if predecessor.status == TaskStatus::Done {
+                continue;
+            }
+
+            let fixed_end = fixed_blocks
+                .iter()
+                .filter(|block| block.id == *predecessor_id)
+                .filter_map(|block| block.window.as_ref().map(|window| window.end))
+                .max();
+            if let Some(end) = fixed_end {
+                earliest_floor = earliest_floor.max(end);
+            } else if candidates.contains(predecessor_id) {
+                // Keep excluded candidates here so the placer surfaces the
+                // downstream "predecessor unplaced" cascade.
+                sched_predecessors.push(*predecessor_id);
+            } else if !visible_as_content(predecessor.tier, clearance) {
+                unresolved_hidden_precedence = true;
+            }
+        }
+
+        if unresolved_hidden_precedence {
+            conflicts.push(Conflict {
+                item: task.id,
+                reason: "unresolved hidden precedence".to_string(),
+            });
+            continue;
+        }
+
+        items.push(Placeable {
+            task_id: task.id,
+            duration: task.est_duration,
+            affect_cost: task.affect_cost,
+            earliest_floor,
+            due: task.due,
+            sched_predecessors,
+        });
+    }
+
+    let output = planner.place(&PlacementInput {
+        items,
+        fixed_occupied: fixed_blocks
+            .iter()
+            .filter_map(|block| block.window.clone())
+            .collect(),
+        budget: budget.clone(),
+    });
+    conflicts.extend(output.conflicts);
+
+    let entry_ends: BTreeMap<Id, DateTime<Utc>> = output
+        .entries
+        .iter()
+        .map(|entry| (entry.item, entry.window.end))
+        .collect();
+    let objective_etas = store
+        .objectives
+        .keys()
+        .map(|objective_id| {
+            let mut latest: Option<DateTime<Utc>> = None;
+            let mut all_scheduled = true;
+            for task in store
+                .tasks
+                .values()
+                .filter(|task| task.objective_ids.contains(objective_id))
+            {
+                match entry_ends.get(&task.id) {
+                    Some(end) => latest = Some(latest.map_or(*end, |current| current.max(*end))),
+                    None => all_scheduled = false,
+                }
+            }
+            (*objective_id, all_scheduled.then_some(latest).flatten())
+        })
+        .collect();
+
+    Ok(Plan {
+        id: uuid::Uuid::new_v4(),
+        created_at: planned_at,
+        authority,
+        clearance,
+        entries: output.entries,
+        objective_etas,
+        conflicts,
+    })
+}
+
+fn candidate_order(
+    store: &Store,
+    candidates: &BTreeSet<Id>,
+    rank: &BTreeMap<Id, usize>,
+) -> Vec<Id> {
+    let mut indegree: BTreeMap<Id, usize> =
+        candidates.iter().map(|task_id| (*task_id, 0)).collect();
+    let mut dependents: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+    for task_id in candidates {
+        for predecessor_id in &store.tasks[task_id].blocked_by {
+            if candidates.contains(predecessor_id) {
+                *indegree.get_mut(task_id).expect("candidate has indegree") += 1;
+                dependents
+                    .entry(*predecessor_id)
+                    .or_default()
+                    .push(*task_id);
+            }
+        }
+    }
+
+    let priority = |task_id: Id| (rank.get(&task_id).copied().unwrap_or(usize::MAX), task_id);
+    let mut ready: BTreeSet<(usize, Id)> = indegree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(task_id, _)| priority(*task_id))
+        .collect();
+    let mut order = Vec::with_capacity(candidates.len());
+    while let Some(next) = ready.iter().next().copied() {
+        ready.remove(&next);
+        let task_id = next.1;
+        order.push(task_id);
+        if let Some(blocked) = dependents.get(&task_id) {
+            for dependent_id in blocked {
+                let degree = indegree
+                    .get_mut(dependent_id)
+                    .expect("dependent is a candidate");
+                *degree -= 1;
+                if *degree == 0 {
+                    ready.insert(priority(*dependent_id));
+                }
+            }
+        }
+    }
+
+    debug_assert_eq!(order.len(), candidates.len());
+    order
 }
 
 fn earliest_gap(
