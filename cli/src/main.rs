@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+mod persist;
+
 #[derive(Debug, Parser)]
 #[command(name = "quick-ubu")]
 struct Cli {
