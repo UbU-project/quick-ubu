@@ -326,6 +326,30 @@ re_plan(state: &Store, deviation: Deviation, target: ComputeTarget) -> Plan
   silently dropped, never force-fit past a hard constraint.
 - The affect budget is a hard per-window cap: high-drain tasks are not stacked.
 
+**Dependencies are physical preconditions, not scheduling hints.** A `blocked_by`
+edge means the dependent literally cannot commence until the predecessor
+completes — drying laundry cannot begin until the washer is done. The planner
+therefore never places a task ahead of an unfinished predecessor; where it cannot
+know when the predecessor completes, it surfaces a conflict rather than guessing.
+The predecessor cases:
+
+- **`Done`** → satisfied; imposes no floor.
+- **fixed block** (above-clearance handle with a window) → floor = its
+  `window.end`.
+- **schedulable candidate** → floor = its placed end this run; if that candidate
+  failed to place, the dependent conflicts (`"predecessor unplaced"`).
+- **above-clearance, unknowable slot** → `"unresolved hidden precedence"` (§9).
+- **in flight or parked** (`Active`/`Deferred`, visible, no known completion
+  time) → **`"predecessor in flight"`**. The dependent cannot be placed because
+  its precondition has no resolved end, and scheduling it anyway would assert a
+  physically impossible order. Surfaced for adjudication, never scheduled.
+
+> *Status:* the `"predecessor in flight"` conflict is specified here and lands
+> when `Active`-in-flight anchoring is implemented; until then P-1 excludes
+> `Active`/`Deferred` predecessors from the floor computation, which can under-
+> constrain a dependent. Recorded so the gap is closed deliberately, not
+> silently.
+
 ---
 
 ## 9. Operation contract — `defer` (offline-capable blind override)
