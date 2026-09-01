@@ -6,6 +6,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::store::Store;
 use crate::types::{CoreError, Id};
 
@@ -228,4 +230,57 @@ fn singleton_member(store: &Store, bundle_id: Id, preference_index: usize) -> Re
         .iter()
         .next()
         .expect("length checked to be exactly one"))
+}
+
+/// Opaque placeholder until the planner supplies windows.
+pub type WindowKey = String;
+
+/// Max net affect load per window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AffectBudget {
+    pub cap: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AffectViolation {
+    pub window: WindowKey,
+    pub load: i32,
+    pub cap: i32,
+    pub tasks: Vec<Id>,
+}
+
+/// Sum each group's `affect_cost` and report the windows over budget.
+///
+/// A group id absent from the store yields [`CoreError::UnknownTask`]. A
+/// violation is emitted iff `load > budget.cap`, with `tasks` sorted by ascending
+/// `Id`; violations come back sorted by `window` key ascending.
+pub fn affect_violations(
+    groups: &BTreeMap<WindowKey, Vec<Id>>,
+    store: &Store,
+    budget: &AffectBudget,
+) -> Result<Vec<AffectViolation>, CoreError> {
+    // `groups` is a BTreeMap, so iteration is already window-key ascending.
+    let mut violations = Vec::new();
+    for (window, task_ids) in groups {
+        let mut load: i32 = 0;
+        for task_id in task_ids {
+            let task = store
+                .tasks
+                .get(task_id)
+                .ok_or(CoreError::UnknownTask { id: *task_id })?;
+            // Saturating: an overflowing sum is still unambiguously over cap.
+            load = load.saturating_add(task.affect_cost);
+        }
+        if load > budget.cap {
+            let mut tasks = task_ids.clone();
+            tasks.sort();
+            violations.push(AffectViolation {
+                window: window.clone(),
+                load,
+                cap: budget.cap,
+                tasks,
+            });
+        }
+    }
+    Ok(violations)
 }
