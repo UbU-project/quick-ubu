@@ -1,7 +1,11 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 
+use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
+use ubu_core::{TaskStatus, Tier};
 
+mod logic;
 mod persist;
 
 #[derive(Debug, Parser)]
@@ -62,6 +66,144 @@ struct ReplanArgs {
     affect_cap: i32,
 }
 
-fn main() {
-    let _ = Cli::parse();
+fn main() -> ExitCode {
+    match run(Cli::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("quick-ubu: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<(), String> {
+    let mut store = persist::load(&cli.store)?;
+
+    match cli.command {
+        Command::Add(args) => {
+            let id = logic::add(
+                &mut store,
+                logic::AddInput {
+                    title: args.title,
+                    duration_minutes: args.duration,
+                    tier: logic::parse_tier(&args.tier)?,
+                    affect_cost: args.affect,
+                    due: parse_optional_datetime(args.due)?,
+                    earliest_start: parse_optional_datetime(args.earliest_start)?,
+                    objective_prefixes: args.objective,
+                    blocked_by_prefixes: args.blocked_by,
+                },
+            )?;
+            persist::save(&cli.store, &store)?;
+            println!("{id}");
+        }
+        Command::List => {
+            for row in logic::list(&store) {
+                let due = row
+                    .due
+                    .map(|date| format!("  due {}", date.to_rfc3339()))
+                    .unwrap_or_default();
+                println!(
+                    "{}  {}  {}  {}m  aff:{}{}  {}",
+                    short_id(row.id),
+                    task_status_name(&row.status),
+                    tier_name(row.tier),
+                    row.duration_minutes,
+                    row.affect_cost,
+                    due,
+                    row.title
+                );
+            }
+        }
+        Command::Done { prefix } => {
+            logic::done(&mut store, &prefix)?;
+            persist::save(&cli.store, &store)?;
+        }
+        Command::Defer { prefix } => {
+            logic::defer(&mut store, &prefix)?;
+            persist::save(&cli.store, &store)?;
+        }
+        Command::ObjectiveAdd(args) => {
+            let id = logic::objective_add(
+                &mut store,
+                logic::ObjectiveAddInput {
+                    title: args.title,
+                    tier: logic::parse_tier(&args.tier)?,
+                    target_date: parse_optional_datetime(args.target_date)?,
+                },
+            );
+            persist::save(&cli.store, &store)?;
+            println!("{id}");
+        }
+        Command::Replan(args) => {
+            let now = Utc::now();
+            let horizon = match args.horizon {
+                Some(value) => logic::parse_datetime(&value)?,
+                None => now,
+            };
+            let output = logic::replan(&store, now, horizon, args.affect_cap)
+                .map_err(|error| format!("replan failed: {error:?}"))?;
+            print_replan(output);
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_optional_datetime(value: Option<String>) -> Result<Option<DateTime<Utc>>, String> {
+    value.as_deref().map(logic::parse_datetime).transpose()
+}
+
+fn print_replan(output: logic::ReplanOutput) {
+    println!("Schedule:");
+    for entry in output.schedule {
+        println!(
+            "{}–{}  {} ({})",
+            entry.window.start.format("%H:%M"),
+            entry.window.end.format("%H:%M"),
+            entry.title,
+            short_id(entry.id)
+        );
+    }
+
+    println!("Objective ETAs:");
+    for objective in output.objective_etas {
+        let eta = objective
+            .eta
+            .map(|datetime| datetime.to_rfc3339())
+            .unwrap_or_else(|| "unscheduled".to_string());
+        println!("{} → {eta}", objective.title);
+    }
+
+    println!("Conflicts:");
+    for conflict in output.conflicts {
+        println!(
+            "{} ({}): {}",
+            conflict.title,
+            short_id(conflict.id),
+            conflict.reason
+        );
+    }
+}
+
+fn short_id(id: ubu_core::Id) -> String {
+    id.simple().to_string()[..8].to_string()
+}
+
+fn tier_name(tier: Tier) -> &'static str {
+    match tier {
+        Tier::SemiPublic => "semi-public",
+        Tier::UserShared => "user-shared",
+        Tier::TopSecret => "top-secret",
+    }
+}
+
+fn task_status_name(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Backlog => "backlog",
+        TaskStatus::Scheduled => "scheduled",
+        TaskStatus::Active => "active",
+        TaskStatus::Done => "done",
+        TaskStatus::Deferred => "deferred",
+    }
 }
