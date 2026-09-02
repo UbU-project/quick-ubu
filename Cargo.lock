@@ -183,6 +183,7 @@ dependencies = [
  "chrono",
  "clap",
  "core",
+ "ollama-planner",
  "serde_json",
  "uuid",
 ]

@@ -2,8 +2,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use chrono::{DateTime, Utc};
-use clap::{Args, Parser, Subcommand};
-use ubu_core::{TaskStatus, Tier};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use ollama_planner::{OllamaHttpTransport, OllamaPlanner};
+use ubu_core::{Planner, TaskStatus, Tier};
 
 mod logic;
 mod persist;
@@ -64,6 +65,20 @@ struct ReplanArgs {
     horizon: Option<String>,
     #[arg(long, default_value_t = 100)]
     affect_cap: i32,
+    #[arg(long, value_enum, default_value_t = PlannerChoice::Deterministic)]
+    planner: PlannerChoice,
+    #[arg(long, default_value = "http://localhost:11434")]
+    ollama_url: String,
+    #[arg(long, required_if_eq("planner", "ollama"))]
+    model: Option<String>,
+    #[arg(long, default_value_t = 30)]
+    ollama_timeout: u64,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum PlannerChoice {
+    Deterministic,
+    Ollama,
 }
 
 fn main() -> ExitCode {
@@ -141,8 +156,29 @@ fn run(cli: Cli) -> Result<(), String> {
                 Some(value) => logic::parse_datetime(&value)?,
                 None => now,
             };
-            let output = logic::replan(&store, now, horizon, args.affect_cap)
-                .map_err(|error| format!("replan failed: {error:?}"))?;
+            let output = match args.planner {
+                PlannerChoice::Deterministic => {
+                    logic::replan(&store, now, horizon, args.affect_cap)
+                }
+                PlannerChoice::Ollama => {
+                    let model = args
+                        .model
+                        .expect("clap requires --model when --planner ollama");
+                    let planner = OllamaPlanner::new(OllamaHttpTransport {
+                        base_url: args.ollama_url,
+                        model,
+                        timeout_secs: args.ollama_timeout,
+                    });
+                    logic::replan_with_planner(
+                        &store,
+                        now,
+                        horizon,
+                        args.affect_cap,
+                        &planner as &dyn Planner,
+                    )
+                }
+            }
+            .map_err(|error| format!("replan failed: {error:?}"))?;
             print_replan(output);
         }
     }

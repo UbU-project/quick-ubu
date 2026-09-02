@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use ubu_core::{
     re_plan, AffectBudget, ComputeTarget, CoreError, DeferPolicy, DeterministicPlacer, Id,
-    Objective, ObjectiveStatus, Provenance, Store, Task, TaskStatus, Tier, TimeWindow,
+    Objective, ObjectiveStatus, Planner, Provenance, Store, Task, TaskStatus, Tier, TimeWindow,
 };
 use uuid::Uuid;
 
@@ -148,6 +148,16 @@ pub fn replan(
     horizon: DateTime<Utc>,
     affect_cap: i32,
 ) -> Result<ReplanOutput, CoreError> {
+    replan_with_planner(store, now, horizon, affect_cap, &DeterministicPlacer)
+}
+
+pub fn replan_with_planner(
+    store: &Store,
+    now: DateTime<Utc>,
+    horizon: DateTime<Utc>,
+    affect_cap: i32,
+    planner: &dyn Planner,
+) -> Result<ReplanOutput, CoreError> {
     let plan = re_plan(
         store,
         ComputeTarget::DesktopOllama,
@@ -155,7 +165,7 @@ pub fn replan(
         horizon,
         &[],
         &AffectBudget { cap: affect_cap },
-        &DeterministicPlacer,
+        planner,
     )?;
 
     let mut schedule = plan

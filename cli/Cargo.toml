@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 ubu_core = { path = "../core", package = "core" }
+ollama-planner = { path = "../ollama-planner" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["clock"] }
