@@ -4,12 +4,14 @@
 pub mod plan;
 pub mod planning;
 pub mod precompute;
+pub mod project;
 pub mod store;
 pub mod types;
 
 pub use plan::*;
 pub use planning::*;
 pub use precompute::*;
+pub use project::*;
 pub use store::Store;
 pub use types::*;
 
