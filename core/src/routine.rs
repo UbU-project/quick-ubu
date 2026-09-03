@@ -7,6 +7,7 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
+use crate::store::Store;
 use crate::types::{DeferPolicy, Id, Provenance, Task, TaskStatus, Tier, TimeWindow};
 
 const NAMESPACE: Uuid = Uuid::from_u128(0x6f51_89f1_6208_5c1e_a8ec_15c0f894ea9d);
@@ -54,6 +55,12 @@ pub struct RoutineTemplate {
     pub duration: Duration,
     pub affect_cost: i32,
     pub recurrence: Recurrence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerateReport {
+    pub created: usize,
+    pub skipped: usize,
 }
 
 fn matches_date(recurrence: &Recurrence, date: NaiveDate) -> bool {
@@ -122,6 +129,30 @@ pub fn expand_routine(
         )
     });
     tasks
+}
+
+pub fn generate_routine_tasks(
+    store: &mut Store,
+    from: NaiveDate,
+    days: u32,
+    tz: Tz,
+) -> GenerateReport {
+    let templates: Vec<RoutineTemplate> = store.routines().values().cloned().collect();
+    let mut report = GenerateReport {
+        created: 0,
+        skipped: 0,
+    };
+
+    for task in expand_routine(&templates, from, days, tz) {
+        if store.tasks.contains_key(&task.id) {
+            report.skipped += 1;
+        } else {
+            store.upsert_task(task);
+            report.created += 1;
+        }
+    }
+
+    report
 }
 
 #[cfg(test)]
