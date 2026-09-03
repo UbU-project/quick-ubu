@@ -2,7 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use ubu_core::{Store, TaskStatus};
+use chrono::{Duration, NaiveTime};
+use ubu_core::{Recurrence, RoutineTemplate, Store, TaskStatus, Tier};
 use uuid::Uuid;
 
 fn temp_store() -> (PathBuf, PathBuf) {
@@ -98,4 +99,105 @@ fn next_prints_nothing_ready_for_an_empty_store() {
     if directory.exists() {
         fs::remove_dir_all(directory).expect("temporary directory is removable");
     }
+}
+
+#[test]
+fn routine_import_list_and_generate_complete_the_cli_flow() {
+    let (directory, store_path) = temp_store();
+    fs::create_dir_all(&directory).expect("temporary directory is creatable");
+    let import_path = directory.join("routines.json");
+    let routines = vec![
+        RoutineTemplate {
+            id: Uuid::from_u128(1),
+            title: "Morning focus".to_string(),
+            tier: Tier::UserShared,
+            start_time: NaiveTime::from_hms_opt(6, 30, 0).unwrap(),
+            duration: Duration::minutes(45),
+            affect_cost: 2,
+            recurrence: Recurrence::Daily,
+        },
+        RoutineTemplate {
+            id: Uuid::from_u128(2),
+            title: "Pay bills".to_string(),
+            tier: Tier::SemiPublic,
+            start_time: NaiveTime::from_hms_opt(18, 0, 0).unwrap(),
+            duration: Duration::minutes(15),
+            affect_cost: 1,
+            recurrence: Recurrence::MonthlyDay {
+                days: [1, 15].into_iter().collect(),
+            },
+        },
+    ];
+    fs::write(
+        &import_path,
+        serde_json::to_string_pretty(&routines).unwrap(),
+    )
+    .expect("routine import fixture is writable");
+
+    let imported = quick_ubu(
+        &store_path,
+        &["routine-import", import_path.to_str().unwrap()],
+    );
+    assert_success(&imported);
+    assert_eq!(String::from_utf8(imported.stdout).unwrap(), "imported 2\n");
+    let imported_store: Store =
+        serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
+    assert_eq!(imported_store.routines().len(), 2);
+    assert!(imported_store.tasks.is_empty());
+
+    let listed = quick_ubu(&store_path, &["routine-list"]);
+    assert_success(&listed);
+    let list_output = String::from_utf8(listed.stdout).unwrap();
+    assert!(list_output.contains("Morning focus"));
+    assert!(list_output.contains("user-shared"));
+    assert!(list_output.contains("06:30:00"));
+    assert!(list_output.contains("2700s"));
+    assert!(list_output.contains("Daily"));
+    assert!(list_output.contains("Pay bills"));
+    assert!(list_output.contains("MonthlyDay[1,15]"));
+
+    let generated = quick_ubu(
+        &store_path,
+        &[
+            "generate",
+            "--from",
+            "2030-01-01",
+            "--days",
+            "2",
+            "--tz",
+            "UTC",
+        ],
+    );
+    assert_success(&generated);
+    assert_eq!(
+        String::from_utf8(generated.stdout).unwrap(),
+        "created 3, skipped 0\n"
+    );
+    let generated_store: Store =
+        serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
+    assert_eq!(generated_store.tasks.len(), 3);
+    assert!(generated_store
+        .tasks
+        .values()
+        .all(|task| task.status == TaskStatus::Scheduled && task.pinned.is_some()));
+
+    let repeated = quick_ubu(
+        &store_path,
+        &[
+            "generate",
+            "--from",
+            "2030-01-01",
+            "--days",
+            "2",
+            "--tz",
+            "UTC",
+        ],
+    );
+    assert_success(&repeated);
+    assert_eq!(
+        String::from_utf8(repeated.stdout).unwrap(),
+        "created 0, skipped 3\n"
+    );
+
+    fs::remove_dir_all(directory).expect("temporary directory is removable");
 }

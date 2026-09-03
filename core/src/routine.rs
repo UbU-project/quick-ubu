@@ -374,4 +374,137 @@ mod tests {
         assert_eq!(pinned_start(&tasks[0]).hour(), 5);
         assert_eq!(pinned_start(&tasks[0]).minute(), 30);
     }
+
+    #[test]
+    fn generation_creates_expected_tasks_then_skips_every_duplicate() {
+        let mut store = Store::new();
+        store.upsert_routine(template(1, Recurrence::Daily));
+
+        let first = generate_routine_tasks(&mut store, date(2026, 9, 1), 3, chrono_tz::UTC);
+        assert_eq!(
+            first,
+            GenerateReport {
+                created: 3,
+                skipped: 0,
+            }
+        );
+        assert_eq!(store.tasks.len(), 3);
+        assert!(store.tasks.values().all(|task| {
+            task.status == TaskStatus::Scheduled
+                && task.pinned.is_some()
+                && task.title == "routine-1"
+        }));
+        let after_first = store.tasks.clone();
+
+        let second = generate_routine_tasks(&mut store, date(2026, 9, 1), 3, chrono_tz::UTC);
+        assert_eq!(
+            second,
+            GenerateReport {
+                created: 0,
+                skipped: 3,
+            }
+        );
+        assert_eq!(store.tasks, after_first);
+        assert_eq!(
+            store.tasks.keys().copied().collect::<BTreeSet<_>>().len(),
+            3
+        );
+    }
+
+    #[test]
+    fn regeneration_never_clobbers_a_moved_or_completed_task() {
+        let mut store = Store::new();
+        store.upsert_routine(template(1, Recurrence::Daily));
+        generate_routine_tasks(&mut store, date(2026, 9, 1), 1, chrono_tz::UTC);
+        let task_id = *store.tasks.keys().next().unwrap();
+        let task = store.tasks.get_mut(&task_id).unwrap();
+        let original = task.pinned.as_ref().unwrap().clone();
+        task.pinned = Some(TimeWindow {
+            start: original.start + Duration::hours(2),
+            end: original.end + Duration::hours(2),
+        });
+        task.status = TaskStatus::Done;
+        let changed = task.clone();
+
+        let report = generate_routine_tasks(&mut store, date(2026, 9, 1), 1, chrono_tz::UTC);
+
+        assert_eq!(
+            report,
+            GenerateReport {
+                created: 0,
+                skipped: 1,
+            }
+        );
+        assert_eq!(store.tasks[&task_id], changed);
+    }
+
+    #[test]
+    fn adding_template_fills_only_its_tasks_for_covered_dates() {
+        let mut store = Store::new();
+        store.upsert_routine(template(1, Recurrence::Daily));
+        generate_routine_tasks(&mut store, date(2026, 9, 1), 2, chrono_tz::UTC);
+        let original_ids: BTreeSet<Id> = store.tasks.keys().copied().collect();
+
+        let added = template(2, Recurrence::Daily);
+        let expected_new_ids: BTreeSet<Id> = expand_routine(
+            std::slice::from_ref(&added),
+            date(2026, 9, 1),
+            2,
+            chrono_tz::UTC,
+        )
+        .into_iter()
+        .map(|task| task.id)
+        .collect();
+        store.upsert_routine(added);
+        let report = generate_routine_tasks(&mut store, date(2026, 9, 1), 2, chrono_tz::UTC);
+
+        assert_eq!(
+            report,
+            GenerateReport {
+                created: 2,
+                skipped: 2,
+            }
+        );
+        assert!(original_ids.iter().all(|id| store.tasks.contains_key(id)));
+        assert!(expected_new_ids
+            .iter()
+            .all(|id| store.tasks.contains_key(id)));
+        assert_eq!(store.tasks.len(), 4);
+    }
+
+    #[test]
+    fn store_json_without_routines_defaults_to_an_empty_map() {
+        let mut store = Store::new();
+        store.upsert_routine(template(1, Recurrence::Daily));
+        let mut value = serde_json::to_value(store).expect("store serializes");
+        value
+            .as_object_mut()
+            .expect("store serializes as an object")
+            .remove("routines");
+        let legacy_json = serde_json::to_string(&value).expect("JSON serializes");
+        assert!(!legacy_json.contains("routines"));
+
+        let loaded: Store = serde_json::from_str(&legacy_json).expect("legacy store loads");
+
+        assert!(loaded.routines().is_empty());
+    }
+
+    #[test]
+    fn routine_store_methods_upsert_list_and_remove_by_id() {
+        let mut store = Store::new();
+        let first = template(1, Recurrence::Daily);
+        assert_eq!(store.upsert_routine(first.clone()), None);
+        assert_eq!(store.routines().get(&first.id), Some(&first));
+
+        let replacement = RoutineTemplate {
+            title: "replacement".to_string(),
+            ..first.clone()
+        };
+        assert_eq!(
+            store.upsert_routine(replacement.clone()),
+            Some(first.clone())
+        );
+        assert_eq!(store.remove_routine(first.id), Some(replacement));
+        assert!(store.routines().is_empty());
+    }
 }
