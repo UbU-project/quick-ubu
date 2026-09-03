@@ -144,7 +144,14 @@ pub fn re_plan(
         })
         .map(|task| task.id)
         .collect();
-    let order = candidate_order(store, &candidates, &rank);
+    let pinned_candidates: BTreeSet<Id> = candidates
+        .iter()
+        .filter(|task_id| store.tasks[task_id].pinned.is_some())
+        .copied()
+        .collect();
+    let unpinned_candidates: BTreeSet<Id> =
+        candidates.difference(&pinned_candidates).copied().collect();
+    let order = candidate_order(store, &unpinned_candidates, &rank);
 
     let mut items = Vec::new();
     let mut conflicts = Vec::new();
@@ -164,6 +171,11 @@ pub fn re_plan(
                 continue;
             }
 
+            if let Some(window) = &predecessor.pinned {
+                earliest_floor = earliest_floor.max(window.end);
+                continue;
+            }
+
             let fixed_end = fixed_blocks
                 .iter()
                 .filter(|block| block.id == *predecessor_id)
@@ -171,7 +183,7 @@ pub fn re_plan(
                 .max();
             if let Some(end) = fixed_end {
                 earliest_floor = earliest_floor.max(end);
-            } else if candidates.contains(predecessor_id) {
+            } else if unpinned_candidates.contains(predecessor_id) {
                 // Keep excluded candidates here so the placer surfaces the
                 // downstream "predecessor unplaced" cascade.
                 sched_predecessors.push(*predecessor_id);
@@ -208,18 +220,36 @@ pub fn re_plan(
         });
     }
 
+    let mut fixed_occupied: Vec<TimeWindow> = fixed_blocks
+        .iter()
+        .filter_map(|block| block.window.clone())
+        .collect();
+    fixed_occupied.extend(
+        pinned_candidates
+            .iter()
+            .filter_map(|task_id| store.tasks[task_id].pinned.clone()),
+    );
     let output = planner.place(&PlacementInput {
         items,
-        fixed_occupied: fixed_blocks
-            .iter()
-            .filter_map(|block| block.window.clone())
-            .collect(),
+        fixed_occupied,
         budget: budget.clone(),
     });
     conflicts.extend(output.conflicts);
 
-    let entry_ends: BTreeMap<Id, DateTime<Utc>> = output
-        .entries
+    let mut entries = output.entries;
+    entries.extend(pinned_candidates.iter().map(|task_id| {
+        ScheduleEntry {
+            item: *task_id,
+            window: store.tasks[task_id]
+                .pinned
+                .clone()
+                .expect("pinned candidate has a window"),
+            is_handle: false,
+        }
+    }));
+    entries.sort_by_key(|entry| (entry.window.start, entry.item));
+
+    let entry_ends: BTreeMap<Id, DateTime<Utc>> = entries
         .iter()
         .map(|entry| (entry.item, entry.window.end))
         .collect();
@@ -248,7 +278,7 @@ pub fn re_plan(
         created_at: planned_at,
         authority,
         clearance,
-        entries: output.entries,
+        entries,
         objective_etas,
         conflicts,
     })
