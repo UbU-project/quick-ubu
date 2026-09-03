@@ -54,6 +54,10 @@ pub struct RoutineTemplate {
     pub start_time: NaiveTime,
     pub duration: Duration,
     pub affect_cost: i32,
+    /// Free-form classification (e.g. "personal", "relationship", "business").
+    /// Maps to a calendar color on export and groups time in reporting.
+    #[serde(default)]
+    pub category: Option<String>,
     pub recurrence: Recurrence,
 }
 
@@ -109,6 +113,7 @@ pub fn expand_routine(
                 est_duration: template.duration,
                 due: None,
                 earliest_start: None,
+                category: None,
                 pinned: Some(TimeWindow { start, end }),
                 blocked_by: Vec::new(),
                 defer_policy: DeferPolicy::RescheduleAsap,
@@ -181,6 +186,7 @@ mod tests {
             start_time: time(6, 30),
             duration: Duration::minutes(45),
             affect_cost: 3,
+            category: None,
             recurrence,
         }
     }
@@ -498,6 +504,7 @@ mod tests {
 
         let replacement = RoutineTemplate {
             title: "replacement".to_string(),
+            category: None,
             ..first.clone()
         };
         assert_eq!(

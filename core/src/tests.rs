@@ -40,6 +40,7 @@ fn task(n: u128) -> Task {
         est_duration: chrono::Duration::minutes(30),
         due: None,
         earliest_start: None,
+        category: None,
         pinned: None,
         blocked_by: Vec::new(),
         defer_policy: DeferPolicy::RescheduleAsap,
@@ -52,6 +53,7 @@ fn task(n: u128) -> Task {
 fn blocked(n: u128, blockers: &[u128]) -> Task {
     Task {
         blocked_by: blockers.iter().copied().map(id).collect(),
+        category: None,
         ..task(n)
     }
 }
@@ -59,6 +61,7 @@ fn blocked(n: u128, blockers: &[u128]) -> Task {
 fn costed(n: u128, affect_cost: i32) -> Task {
     Task {
         affect_cost,
+        category: None,
         ..task(n)
     }
 }
@@ -259,6 +262,7 @@ fn validate_accepts_a_referentially_whole_store() {
     store.upsert_task(task(1));
     store.upsert_task(Task {
         objective_ids: vec![id(10)],
+        category: None,
         ..blocked(2, &[1])
     });
     store.upsert_bundle(bundle(100, &[1]));
@@ -272,6 +276,7 @@ fn validate_reports_every_dangling_reference() {
     let mut store = Store::new();
     store.upsert_task(Task {
         objective_ids: vec![id(77)],
+        category: None,
         ..blocked(1, &[66])
     });
     store.upsert_bundle(bundle(100, &[55]));
@@ -650,6 +655,7 @@ fn pinned_task(n: u128, start: i64, end: i64) -> Task {
             start: at(start),
             end: at(end),
         }),
+        category: None,
         ..task(n)
     }
 }
@@ -658,11 +664,13 @@ fn pinned_task(n: u128, start: i64, end: i64) -> Task {
 fn pinned_task_is_emitted_at_its_window_and_dynamic_task_uses_a_gap() {
     let pinned = Task {
         objective_ids: vec![id(100)],
+        category: None,
         ..pinned_task(1, 3_600, 7_200)
     };
     let pinned_window = pinned.pinned.clone().unwrap();
     let dynamic = Task {
         est_duration: chrono::Duration::minutes(90),
+        category: None,
         ..task(2)
     };
     let mut store = store_with_tasks(vec![pinned, dynamic]);
@@ -704,6 +712,7 @@ proptest! {
         let pinned_window = pinned.pinned.clone().unwrap();
         let dynamic = Task {
             est_duration: chrono::Duration::minutes(dynamic_duration_minutes),
+            category: None,
             ..task(2)
         };
         let store = store_with_tasks(vec![pinned, dynamic]);
@@ -834,6 +843,7 @@ fn re_plan_is_deterministic_with_pinned_tasks() {
     let store = store_with_tasks(vec![
         Task {
             est_duration: chrono::Duration::hours(2),
+            category: None,
             ..task(1)
         },
         pinned_task(2, 3_600, 7_200),
@@ -1074,18 +1084,21 @@ fn desktop_ollama_builds_a_full_precedence_safe_plan_with_etas() {
     store.upsert_task(Task {
         objective_ids: vec![id(100)],
         est_duration: chrono::Duration::hours(1),
+        category: None,
         ..task(1)
     });
     store.upsert_task(Task {
         objective_ids: vec![id(100)],
         est_duration: chrono::Duration::minutes(30),
         status: TaskStatus::Scheduled,
+        category: None,
         ..blocked(2, &[1])
     });
     store.upsert_task(Task {
         tier: Tier::TopSecret,
         objective_ids: vec![id(101)],
         est_duration: chrono::Duration::minutes(45),
+        category: None,
         ..blocked(3, &[2])
     });
 
@@ -1120,28 +1133,34 @@ fn hosted_llm_uses_fixed_blocks_and_conflicts_hidden_precedence() {
     let mut store = Store::new();
     store.upsert_task(Task {
         tier: Tier::TopSecret,
+        category: None,
         ..task(1)
     });
     store.upsert_task(Task {
         tier: Tier::SemiPublic,
         est_duration: chrono::Duration::minutes(90),
+        category: None,
         ..blocked(2, &[1])
     });
     store.upsert_task(Task {
         tier: Tier::UserShared,
+        category: None,
         ..task(3)
     });
     store.upsert_task(Task {
         tier: Tier::SemiPublic,
+        category: None,
         ..blocked(4, &[3])
     });
     store.upsert_task(Task {
         tier: Tier::SemiPublic,
         est_duration: chrono::Duration::minutes(30),
+        category: None,
         ..task(5)
     });
     store.upsert_task(Task {
         tier: Tier::SemiPublic,
+        category: None,
         ..blocked(6, &[4])
     });
     let fixed = fixed_handle(1, 3_600, 7_200);
@@ -1217,6 +1236,7 @@ fn due_date_conflict_keeps_the_late_entry() {
     let store = store_with_tasks(vec![Task {
         est_duration: chrono::Duration::hours(2),
         due: Some(at(3_600)),
+        category: None,
         ..task(1)
     }]);
     let plan = re_plan(
@@ -1333,8 +1353,8 @@ proptest! {
         let higher = base + 1;
         let lower = base;
         let mut store = store_with_tasks(vec![
-            Task { est_duration: chrono::Duration::minutes(first_minutes), ..task(higher) },
-            Task { est_duration: chrono::Duration::minutes(second_minutes), ..task(lower) },
+            Task { est_duration: chrono::Duration::minutes(first_minutes), category: None, ..task(higher) },
+            Task { est_duration: chrono::Duration::minutes(second_minutes), category: None, ..task(lower) },
         ]);
         store.upsert_bundle(Bundle {
             id: id(100_000 + higher),

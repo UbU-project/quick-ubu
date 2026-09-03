@@ -114,6 +114,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             start_time: NaiveTime::from_hms_opt(6, 30, 0).unwrap(),
             duration: Duration::minutes(45),
             affect_cost: 2,
+            category: None,
             recurrence: Recurrence::Daily,
         },
         RoutineTemplate {
@@ -123,6 +124,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             start_time: NaiveTime::from_hms_opt(18, 0, 0).unwrap(),
             duration: Duration::minutes(15),
             affect_cost: 1,
+            category: None,
             recurrence: Recurrence::MonthlyDay {
                 days: [1, 15].into_iter().collect(),
             },

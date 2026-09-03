@@ -79,6 +79,7 @@ mod tests {
             est_duration: Duration::minutes(minutes),
             due: None,
             earliest_start: None,
+            category: None,
             pinned: None,
             blocked_by: Vec::new(),
             defer_policy: DeferPolicy::ReturnToBacklog,

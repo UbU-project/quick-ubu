@@ -100,6 +100,10 @@ pub struct Task {
     pub est_duration: chrono::Duration,
     pub due: Option<chrono::DateTime<chrono::Utc>>,
     pub earliest_start: Option<chrono::DateTime<chrono::Utc>>,
+    /// Free-form classification (e.g. "personal", "relationship", "business").
+    /// Maps to a calendar color on export and groups time in reporting.
+    #[serde(default)]
+    pub category: Option<String>,
     /// A fixed-time commitment: the task is anchored to this exact window and is
     /// NOT placed by the planner. `None` = a dynamic task the planner schedules.
     #[serde(default)]
