@@ -5,12 +5,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::routine::RoutineTemplate;
 use crate::types::{Bundle, CoreError, Id, LogEntry, Objective, Preference, Task};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Store {
     pub objectives: BTreeMap<Id, Objective>,
     pub tasks: BTreeMap<Id, Task>,
+    #[serde(default)]
+    pub routines: BTreeMap<Id, RoutineTemplate>,
     pub bundles: BTreeMap<Id, Bundle>,
     pub preferences: Vec<Preference>,
     /// append-only SessionLog
@@ -52,6 +55,18 @@ impl Store {
 
     pub fn list_tasks(&self) -> Vec<&Task> {
         self.tasks.values().collect()
+    }
+
+    pub fn upsert_routine(&mut self, routine: RoutineTemplate) -> Option<RoutineTemplate> {
+        self.routines.insert(routine.id, routine)
+    }
+
+    pub fn routines(&self) -> &BTreeMap<Id, RoutineTemplate> {
+        &self.routines
+    }
+
+    pub fn remove_routine(&mut self, id: Id) -> Option<RoutineTemplate> {
+        self.routines.remove(&id)
     }
 
     pub fn upsert_bundle(&mut self, bundle: Bundle) -> Option<Bundle> {
