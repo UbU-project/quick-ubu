@@ -74,3 +74,104 @@ pub async fn export_plan<T: CalendarTransport>(
 
     Ok(report)
 }
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StubCall {
+    Create(CalendarEvent),
+    Update {
+        event_id: String,
+        event: CalendarEvent,
+    },
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct StubTransport {
+    calls: std::cell::RefCell<Vec<StubCall>>,
+    next_id: std::cell::Cell<usize>,
+    create_error: Option<String>,
+    update_error: Option<String>,
+}
+
+#[cfg(test)]
+impl StubTransport {
+    fn with_create_error(error: &str) -> Self {
+        Self {
+            create_error: Some(error.to_string()),
+            ..Self::default()
+        }
+    }
+
+    fn with_update_error(error: &str) -> Self {
+        Self {
+            update_error: Some(error.to_string()),
+            ..Self::default()
+        }
+    }
+}
+
+#[cfg(test)]
+impl CalendarTransport for StubTransport {
+    async fn create_event(&self, event: &CalendarEvent) -> Result<String, String> {
+        self.calls
+            .borrow_mut()
+            .push(StubCall::Create(event.clone()));
+        if let Some(error) = &self.create_error {
+            return Err(error.clone());
+        }
+
+        let id = self.next_id.get() + 1;
+        self.next_id.set(id);
+        Ok(format!("event-{id}"))
+    }
+
+    async fn update_event(&self, event_id: &str, event: &CalendarEvent) -> Result<(), String> {
+        self.calls.borrow_mut().push(StubCall::Update {
+            event_id: event_id.to_string(),
+            event: event.clone(),
+        });
+        if let Some(error) = &self.update_error {
+            return Err(error.clone());
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod stub_tests {
+    use super::*;
+
+    fn event() -> CalendarEvent {
+        CalendarEvent {
+            summary: "test".to_string(),
+            start: DateTime::from_timestamp(0, 0).unwrap(),
+            end: DateTime::from_timestamp(60, 0).unwrap(),
+            color_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn stub_transport_records_calls_and_injects_errors() {
+        let create_stub = StubTransport::with_create_error("create failed");
+        assert_eq!(
+            create_stub.create_event(&event()).await,
+            Err("create failed".to_string())
+        );
+        assert!(matches!(
+            create_stub.calls.borrow().as_slice(),
+            [StubCall::Create(_)]
+        ));
+
+        let update_stub = StubTransport::with_update_error("update failed");
+        assert_eq!(
+            update_stub.update_event("known", &event()).await,
+            Err("update failed".to_string())
+        );
+        assert!(matches!(
+            update_stub.calls.borrow().as_slice(),
+            [StubCall::Update { event_id, .. }] if event_id == "known"
+        ));
+    }
+}
