@@ -619,6 +619,32 @@ mod stub_tests {
         }
     }
 
+    fn fetched_event(
+        event_id: &str,
+        summary: &str,
+        color_id: Option<&str>,
+        start_minutes: i64,
+        end_minutes: i64,
+    ) -> FetchedEvent {
+        FetchedEvent {
+            id: event_id.to_string(),
+            summary: summary.to_string(),
+            color_id: color_id.map(str::to_owned),
+            start: at(start_minutes),
+            end: at(end_minutes),
+        }
+    }
+
+    fn linked_task_id(store: &Store, event_id: &str) -> Id {
+        store
+            .calendar_links
+            .iter()
+            .find_map(|(task_id, linked_event_id)| {
+                (linked_event_id == event_id).then_some(*task_id)
+            })
+            .expect("event is linked")
+    }
+
     #[tokio::test]
     async fn export_creates_one_event_per_entry_and_populates_links() {
         let mut store = Store::new();
@@ -773,5 +799,166 @@ mod stub_tests {
             .unwrap();
         assert_eq!(pinned.color_id.as_deref(), Some("5"));
         assert_eq!(dynamic.color_id, None);
+    }
+
+    #[test]
+    fn default_color_non_owned_event_captures_a_linked_dynamic_task() {
+        let mut store = Store::new();
+        let event = fetched_event("new-dynamic", "Inbox item", None, 60, 90);
+
+        let report = import_from_calendar(
+            &mut store,
+            std::slice::from_ref(&event),
+            at(0),
+            Tier::UserShared,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(
+            report,
+            ImportReport {
+                captured: 1,
+                completed: 0,
+                moved: 0,
+            }
+        );
+        let task_id = linked_task_id(&store, &event.id);
+        let captured = &store.tasks[&task_id];
+        assert_eq!(captured.title, event.summary);
+        assert_eq!(captured.status, TaskStatus::Backlog);
+        assert_eq!(captured.pinned, None);
+        assert_eq!(captured.category, None);
+        assert_eq!(captured.est_duration, Duration::minutes(30));
+        assert_eq!(store.log.len(), 1);
+    }
+
+    #[test]
+    fn colored_non_owned_event_captures_a_categorized_pinned_commitment() {
+        let mut store = Store::new();
+        let event = fetched_event("new-commitment", "Dinner", Some("5"), 120, 180);
+        let colors = BTreeMap::from([("5".to_string(), "relationship".to_string())]);
+
+        let report = import_from_calendar(
+            &mut store,
+            std::slice::from_ref(&event),
+            at(0),
+            Tier::UserShared,
+            &colors,
+        );
+
+        assert_eq!(report.captured, 1);
+        let task_id = linked_task_id(&store, &event.id);
+        let captured = &store.tasks[&task_id];
+        assert_eq!(captured.status, TaskStatus::Scheduled);
+        assert_eq!(
+            captured.pinned,
+            Some(TimeWindow {
+                start: event.start,
+                end: event.end,
+            })
+        );
+        assert_eq!(captured.category.as_deref(), Some("relationship"));
+    }
+
+    #[test]
+    fn colored_owned_dynamic_event_marks_the_task_done() {
+        let mut store = Store::new();
+        let mut dynamic = task(1, "Dynamic", Tier::UserShared, false, None);
+        dynamic.status = TaskStatus::Backlog;
+        let task_id = dynamic.id;
+        store.upsert_task(dynamic);
+        store.upsert_calendar_link(task_id, "owned-dynamic".to_string());
+        let event = fetched_event("owned-dynamic", "Dynamic", Some("8"), 30, 60);
+
+        let report = import_from_calendar(
+            &mut store,
+            &[event],
+            at(0),
+            Tier::UserShared,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(report.completed, 1);
+        assert_eq!(store.tasks[&task_id].status, TaskStatus::Done);
+        assert_eq!(store.log.len(), 1);
+    }
+
+    #[test]
+    fn moved_owned_commitment_updates_its_pin_through_edit_pin() {
+        let mut store = Store::new();
+        let commitment = task(1, "Commitment", Tier::UserShared, true, None);
+        let task_id = commitment.id;
+        store.upsert_task(commitment);
+        store.upsert_calendar_link(task_id, "owned-commitment".to_string());
+        let event = fetched_event("owned-commitment", "Commitment", Some("5"), 300, 360);
+        let expected = TimeWindow {
+            start: event.start,
+            end: event.end,
+        };
+
+        let report = import_from_calendar(
+            &mut store,
+            &[event],
+            at(0),
+            Tier::UserShared,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(report.moved, 1);
+        assert_eq!(store.tasks[&task_id].pinned, Some(expected.clone()));
+        assert!(matches!(
+            &store.log[0].kind,
+            ubu_core::LogEntryKind::Command(ubu_core::CommandKind::EditPin {
+                task_id: logged_id,
+                pinned: Some(logged_window),
+            }) if *logged_id == task_id && logged_window == &expected
+        ));
+    }
+
+    #[test]
+    fn importing_the_same_events_twice_makes_no_second_pass_changes() {
+        let mut store = Store::new();
+        let mut dynamic = task(1, "Existing dynamic", Tier::UserShared, false, None);
+        dynamic.status = TaskStatus::Backlog;
+        store.upsert_task(dynamic);
+        store.upsert_calendar_link(id(1), "owned-dynamic".to_string());
+        store.upsert_task(task(2, "Existing commitment", Tier::UserShared, true, None));
+        store.upsert_calendar_link(id(2), "owned-commitment".to_string());
+        let events = vec![
+            fetched_event("new-dynamic", "New dynamic", None, 0, 30),
+            fetched_event("new-commitment", "New commitment", Some("5"), 30, 60),
+            fetched_event("owned-dynamic", "Existing dynamic", Some("8"), 60, 90),
+            fetched_event(
+                "owned-commitment",
+                "Existing commitment",
+                Some("5"),
+                90,
+                120,
+            ),
+        ];
+        let colors = BTreeMap::from([("5".to_string(), "personal".to_string())]);
+
+        let first = import_from_calendar(&mut store, &events, at(0), Tier::UserShared, &colors);
+        assert_eq!(
+            first,
+            ImportReport {
+                captured: 2,
+                completed: 1,
+                moved: 1,
+            }
+        );
+        let after_first = store.clone();
+
+        let second = import_from_calendar(&mut store, &events, at(1), Tier::UserShared, &colors);
+
+        assert_eq!(
+            second,
+            ImportReport {
+                captured: 0,
+                completed: 0,
+                moved: 0,
+            }
+        );
+        assert_eq!(store, after_first);
     }
 }
