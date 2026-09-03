@@ -40,6 +40,7 @@ fn task(n: u128) -> Task {
         est_duration: chrono::Duration::minutes(30),
         due: None,
         earliest_start: None,
+        pinned: None,
         blocked_by: Vec::new(),
         defer_policy: DeferPolicy::RescheduleAsap,
         status: TaskStatus::Backlog,

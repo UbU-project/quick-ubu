@@ -96,6 +96,7 @@ pub fn add(store: &mut Store, input: AddInput) -> Result<Id, String> {
         est_duration: Duration::minutes(input.duration_minutes),
         due: input.due,
         earliest_start: input.earliest_start,
+        pinned: None,
         blocked_by,
         defer_policy: DeferPolicy::RescheduleAsap,
         status: TaskStatus::Backlog,

@@ -100,6 +100,10 @@ pub struct Task {
     pub est_duration: chrono::Duration,
     pub due: Option<chrono::DateTime<chrono::Utc>>,
     pub earliest_start: Option<chrono::DateTime<chrono::Utc>>,
+    /// A fixed-time commitment: the task is anchored to this exact window and is
+    /// NOT placed by the planner. `None` = a dynamic task the planner schedules.
+    #[serde(default)]
+    pub pinned: Option<TimeWindow>,
     /// precedence edges (dynamic)
     pub blocked_by: Vec<Id>,
     pub defer_policy: DeferPolicy,
