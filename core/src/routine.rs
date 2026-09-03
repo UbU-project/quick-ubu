@@ -123,3 +123,224 @@ pub fn expand_routine(
     });
     tasks
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{NaiveDate, NaiveTime, Timelike};
+
+    use super::*;
+
+    fn id(value: u128) -> Id {
+        Uuid::from_u128(value)
+    }
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
+    fn time(hour: u32, minute: u32) -> NaiveTime {
+        NaiveTime::from_hms_opt(hour, minute, 0).unwrap()
+    }
+
+    fn template(value: u128, recurrence: Recurrence) -> RoutineTemplate {
+        RoutineTemplate {
+            id: id(value),
+            title: format!("routine-{value}"),
+            tier: Tier::UserShared,
+            start_time: time(6, 30),
+            duration: Duration::minutes(45),
+            affect_cost: 3,
+            recurrence,
+        }
+    }
+
+    fn pinned_start(task: &Task) -> chrono::DateTime<Utc> {
+        task.pinned.as_ref().expect("routine task is pinned").start
+    }
+
+    #[test]
+    fn daily_expands_once_per_day_across_the_range() {
+        let tasks = expand_routine(
+            &[template(1, Recurrence::Daily)],
+            date(2026, 9, 1),
+            4,
+            chrono_tz::UTC,
+        );
+
+        assert_eq!(tasks.len(), 4);
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| pinned_start(task).date_naive())
+                .collect::<Vec<_>>(),
+            (1..=4).map(|day| date(2026, 9, day)).collect::<Vec<_>>()
+        );
+        assert!(tasks
+            .iter()
+            .all(|task| task.status == TaskStatus::Scheduled));
+    }
+
+    #[test]
+    fn weekly_expands_only_on_mondays_and_wednesdays() {
+        let weekdays = [Weekday::Mon, Weekday::Wed].into_iter().collect();
+        let tasks = expand_routine(
+            &[template(1, Recurrence::Weekly { weekdays })],
+            date(2024, 1, 1),
+            7,
+            chrono_tz::UTC,
+        );
+
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(pinned_start(&tasks[0]).date_naive(), date(2024, 1, 1));
+        assert_eq!(pinned_start(&tasks[1]).date_naive(), date(2024, 1, 3));
+        assert!(tasks
+            .iter()
+            .all(|task| matches!(pinned_start(task).weekday(), Weekday::Mon | Weekday::Wed)));
+    }
+
+    #[test]
+    fn monthly_expands_only_on_the_first_and_fifteenth() {
+        let tasks = expand_routine(
+            &[template(
+                1,
+                Recurrence::MonthlyDay {
+                    days: [1, 15].into_iter().collect(),
+                },
+            )],
+            date(2024, 1, 1),
+            46,
+            chrono_tz::UTC,
+        );
+
+        assert_eq!(tasks.len(), 4);
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| pinned_start(task).date_naive())
+                .collect::<Vec<_>>(),
+            vec![
+                date(2024, 1, 1),
+                date(2024, 1, 15),
+                date(2024, 2, 1),
+                date(2024, 2, 15),
+            ]
+        );
+    }
+
+    #[test]
+    fn new_york_wall_time_tracks_standard_and_daylight_offsets() {
+        let routine = template(1, Recurrence::Daily);
+        let standard = expand_routine(
+            std::slice::from_ref(&routine),
+            date(2026, 1, 15),
+            1,
+            chrono_tz::America::New_York,
+        );
+        let daylight = expand_routine(
+            &[routine],
+            date(2026, 7, 15),
+            1,
+            chrono_tz::America::New_York,
+        );
+
+        assert_eq!(
+            pinned_start(&standard[0]),
+            date(2026, 1, 15).and_hms_opt(11, 30, 0).unwrap().and_utc()
+        );
+        assert_eq!(
+            pinned_start(&daylight[0]),
+            date(2026, 7, 15).and_hms_opt(10, 30, 0).unwrap().and_utc()
+        );
+    }
+
+    #[test]
+    fn identical_expansions_have_identical_ids_and_output() {
+        let templates = vec![
+            template(2, Recurrence::Daily),
+            template(1, Recurrence::Daily),
+        ];
+
+        let first = expand_routine(&templates, date(2026, 9, 1), 3, chrono_tz::UTC);
+        let second = expand_routine(&templates, date(2026, 9, 1), 3, chrono_tz::UTC);
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.iter().map(|task| task.id).collect::<Vec<_>>(),
+            second.iter().map(|task| task.id).collect::<Vec<_>>()
+        );
+        assert!(first.windows(2).all(|pair| {
+            let left = (pinned_start(&pair[0]), pair[0].id);
+            let right = (pinned_start(&pair[1]), pair[1].id);
+            left <= right
+        }));
+    }
+
+    #[test]
+    fn pinned_window_duration_equals_template_duration() {
+        let routine = template(1, Recurrence::Daily);
+        let tasks = expand_routine(
+            std::slice::from_ref(&routine),
+            date(2026, 9, 1),
+            1,
+            chrono_tz::UTC,
+        );
+        let window = tasks[0].pinned.as_ref().unwrap();
+
+        assert_eq!(window.end - window.start, routine.duration);
+        assert_eq!(tasks[0].est_duration, routine.duration);
+    }
+
+    #[test]
+    fn weekly_recurrence_serde_round_trips() {
+        let recurrence = Recurrence::Weekly {
+            weekdays: [Weekday::Mon, Weekday::Wed].into_iter().collect(),
+        };
+
+        let json = serde_json::to_string(&recurrence).expect("recurrence serializes");
+        let restored: Recurrence = serde_json::from_str(&json).expect("recurrence deserializes");
+
+        assert_eq!(restored, recurrence);
+    }
+
+    #[test]
+    fn nonexistent_spring_forward_time_skips_only_that_occurrence() {
+        let mut routine = template(1, Recurrence::Daily);
+        routine.start_time = time(2, 30);
+
+        let tasks = expand_routine(
+            &[routine],
+            date(2026, 3, 7),
+            3,
+            chrono_tz::America::New_York,
+        );
+
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| {
+                    pinned_start(task)
+                        .with_timezone(&chrono_tz::America::New_York)
+                        .date_naive()
+                })
+                .collect::<Vec<_>>(),
+            vec![date(2026, 3, 7), date(2026, 3, 9)]
+        );
+    }
+
+    #[test]
+    fn ambiguous_fall_back_time_uses_the_earliest_instant() {
+        let mut routine = template(1, Recurrence::Daily);
+        routine.start_time = time(1, 30);
+
+        let tasks = expand_routine(
+            &[routine],
+            date(2026, 11, 1),
+            1,
+            chrono_tz::America::New_York,
+        );
+
+        assert_eq!(pinned_start(&tasks[0]).hour(), 5);
+        assert_eq!(pinned_start(&tasks[0]).minute(), 30);
+    }
+}
