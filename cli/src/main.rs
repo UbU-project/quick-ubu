@@ -1,13 +1,16 @@
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDate, Utc, Weekday};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use gcal::{export_plan, GoogleCalendarTransport};
 use ollama_planner::{OllamaHttpTransport, OllamaPlanner};
 use ubu_core::{
-    generate_routine_tasks, Planner, Recurrence, RoutineTemplate, TaskStatus, Tier, Tz,
+    generate_routine_tasks, re_plan, AffectBudget, ComputeTarget, DeterministicPlacer, Planner,
+    Recurrence, RoutineTemplate, TaskStatus, Tier, Tz,
 };
 
 mod logic;
@@ -35,6 +38,7 @@ enum Command {
     RoutineImport { path: PathBuf },
     RoutineList,
     Generate(GenerateArgs),
+    Export(ExportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -101,6 +105,18 @@ struct GenerateArgs {
     days: u32,
     #[arg(long, default_value = "America/New_York")]
     tz: String,
+}
+
+#[derive(Debug, Args)]
+struct ExportArgs {
+    #[arg(long, default_value = "primary")]
+    calendar_id: String,
+    #[arg(long, default_value = "credentials.json")]
+    credentials: PathBuf,
+    #[arg(long, default_value = "token-cache.json")]
+    token_cache: PathBuf,
+    #[arg(long)]
+    color_config: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -254,6 +270,33 @@ fn run(cli: Cli) -> Result<(), String> {
             persist::save(&cli.store, &store)?;
             println!("created {}, skipped {}", report.created, report.skipped);
         }
+        Command::Export(args) => {
+            let now = Utc::now();
+            let plan = re_plan(
+                &store,
+                ComputeTarget::DesktopOllama,
+                now,
+                now,
+                &[],
+                &AffectBudget { cap: 100 },
+                &DeterministicPlacer,
+            )
+            .map_err(|error| format!("export planning failed: {error:?}"))?;
+            let color_map = load_color_map(args.color_config.as_deref())?;
+            let transport =
+                GoogleCalendarTransport::new(args.credentials, args.token_cache, args.calendar_id);
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| format!("failed to start async runtime: {error}"))?;
+            let report = runtime.block_on(export_plan(
+                &mut store,
+                &plan,
+                &transport,
+                &color_map,
+                Tier::UserShared,
+            ))?;
+            persist::save(&cli.store, &store)?;
+            println!("created {}, updated {}", report.created, report.updated);
+        }
     }
 
     Ok(())
@@ -261,6 +304,16 @@ fn run(cli: Cli) -> Result<(), String> {
 
 fn parse_optional_datetime(value: Option<String>) -> Result<Option<DateTime<Utc>>, String> {
     value.as_deref().map(logic::parse_datetime).transpose()
+}
+
+fn load_color_map(path: Option<&Path>) -> Result<BTreeMap<String, String>, String> {
+    let Some(path) = path else {
+        return Ok(BTreeMap::new());
+    };
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    serde_json::from_str(&contents)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))
 }
 
 fn print_replan(output: logic::ReplanOutput) {
