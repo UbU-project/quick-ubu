@@ -27,6 +27,7 @@ enum Command {
     Defer { prefix: String },
     ObjectiveAdd(ObjectiveAddArgs),
     Replan(ReplanArgs),
+    Next(NextArgs),
 }
 
 #[derive(Debug, Args)]
@@ -43,6 +44,8 @@ struct AddArgs {
     due: Option<String>,
     #[arg(long)]
     earliest_start: Option<String>,
+    #[arg(long)]
+    pin: Option<String>,
     #[arg(long)]
     objective: Vec<String>,
     #[arg(long)]
@@ -75,6 +78,12 @@ struct ReplanArgs {
     ollama_timeout: u64,
 }
 
+#[derive(Debug, Args)]
+struct NextArgs {
+    #[arg(long, default_value_t = 100)]
+    affect_cap: i32,
+}
+
 #[derive(Clone, Debug, ValueEnum)]
 enum PlannerChoice {
     Deterministic,
@@ -105,6 +114,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     affect_cost: args.affect,
                     due: parse_optional_datetime(args.due)?,
                     earliest_start: parse_optional_datetime(args.earliest_start)?,
+                    pin: parse_optional_datetime(args.pin)?,
                     objective_prefixes: args.objective,
                     blocked_by_prefixes: args.blocked_by,
                 },
@@ -181,6 +191,12 @@ fn run(cli: Cli) -> Result<(), String> {
             .map_err(|error| format!("replan failed: {error:?}"))?;
             print_replan(output);
         }
+        Command::Next(args) => {
+            let now = Utc::now();
+            let output = logic::next(&store, now, args.affect_cap)
+                .map_err(|error| format!("next failed: {error:?}"))?;
+            print_next(output);
+        }
     }
 
     Ok(())
@@ -219,6 +235,19 @@ fn print_replan(output: logic::ReplanOutput) {
             short_id(conflict.id),
             conflict.reason
         );
+    }
+}
+
+fn print_next(output: Option<logic::ScheduleRow>) {
+    match output {
+        Some(entry) => println!(
+            "{}–{}  {} ({})",
+            entry.window.start.to_rfc3339(),
+            entry.window.end.to_rfc3339(),
+            entry.title,
+            short_id(entry.id)
+        ),
+        None => println!("nothing ready"),
     }
 }
 

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use ubu_core::{
-    re_plan, AffectBudget, ComputeTarget, CoreError, DeferPolicy, DeterministicPlacer, Id,
-    Objective, ObjectiveStatus, Planner, Provenance, Store, Task, TaskStatus, Tier, TimeWindow,
+    next_task, re_plan, AffectBudget, ComputeTarget, CoreError, DeferPolicy, DeterministicPlacer,
+    Id, Objective, ObjectiveStatus, Planner, Provenance, Store, Task, TaskStatus, Tier, TimeWindow,
 };
 use uuid::Uuid;
 
@@ -14,6 +14,7 @@ pub struct AddInput {
     pub affect_cost: i32,
     pub due: Option<DateTime<Utc>>,
     pub earliest_start: Option<DateTime<Utc>>,
+    pub pin: Option<DateTime<Utc>>,
     pub objective_prefixes: Vec<String>,
     pub blocked_by_prefixes: Vec<String>,
 }
@@ -85,6 +86,16 @@ pub fn add(store: &mut Store, input: AddInput) -> Result<Id, String> {
         .collect::<Result<Vec<_>, _>>()?;
 
     let id = Uuid::new_v4();
+    let duration = Duration::minutes(input.duration_minutes);
+    let pinned = input.pin.map(|start| TimeWindow {
+        start,
+        end: start + duration,
+    });
+    let status = if pinned.is_some() {
+        TaskStatus::Scheduled
+    } else {
+        TaskStatus::Backlog
+    };
     store.upsert_task(Task {
         id,
         tier: input.tier,
@@ -93,13 +104,13 @@ pub fn add(store: &mut Store, input: AddInput) -> Result<Id, String> {
         objective_ids,
         skills: Vec::new(),
         affect_cost: input.affect_cost,
-        est_duration: Duration::minutes(input.duration_minutes),
+        est_duration: duration,
         due: input.due,
         earliest_start: input.earliest_start,
-        pinned: None,
+        pinned,
         blocked_by,
         defer_policy: DeferPolicy::RescheduleAsap,
-        status: TaskStatus::Backlog,
+        status,
         provenance: Provenance::Manual,
         commitment: None,
     });
@@ -210,6 +221,33 @@ pub fn replan_with_planner(
     })
 }
 
+pub fn next(
+    store: &Store,
+    now: DateTime<Utc>,
+    affect_cap: i32,
+) -> Result<Option<ScheduleRow>, CoreError> {
+    let plan = re_plan(
+        store,
+        ComputeTarget::DesktopOllama,
+        now,
+        now,
+        &[],
+        &AffectBudget { cap: affect_cap },
+        &DeterministicPlacer,
+    )?;
+
+    Ok(next_task(store, &plan, now).and_then(|task_id| {
+        plan.entries
+            .iter()
+            .find(|entry| entry.item == task_id)
+            .map(|entry| ScheduleRow {
+                id: task_id,
+                title: task_title(store, task_id),
+                window: entry.window.clone(),
+            })
+    }))
+}
+
 fn set_status(store: &mut Store, prefix: &str, status: TaskStatus) -> Result<(), String> {
     let id = resolve_task_id(store, prefix)?;
     let task = store
@@ -265,6 +303,7 @@ mod tests {
                 affect_cost: 10,
                 due: None,
                 earliest_start: None,
+                pin: None,
                 objective_prefixes: vec![objective_id.simple().to_string()[..8].to_string()],
                 blocked_by_prefixes: Vec::new(),
             },
@@ -301,6 +340,7 @@ mod tests {
                 affect_cost: 101,
                 due: None,
                 earliest_start: None,
+                pin: None,
                 objective_prefixes: Vec::new(),
                 blocked_by_prefixes: Vec::new(),
             },
