@@ -284,6 +284,20 @@ pub fn re_plan(
     })
 }
 
+pub fn next_task(store: &Store, plan: &Plan, now: DateTime<Utc>) -> Option<Id> {
+    plan.entries
+        .iter()
+        .filter(|entry| !entry.is_handle && entry.window.end > now)
+        .filter(|entry| {
+            store
+                .tasks
+                .get(&entry.item)
+                .is_some_and(|task| task.pinned.is_none())
+        })
+        .min_by_key(|entry| (entry.window.start, entry.item))
+        .map(|entry| entry.item)
+}
+
 fn candidate_order(
     store: &Store,
     candidates: &BTreeSet<Id>,
