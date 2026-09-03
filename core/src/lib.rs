@@ -7,6 +7,7 @@ pub mod precompute;
 pub mod project;
 pub mod provisional;
 pub mod reconcile;
+pub mod routine;
 pub mod store;
 pub mod types;
 
@@ -16,6 +17,7 @@ pub use precompute::*;
 pub use project::*;
 pub use provisional::*;
 pub use reconcile::*;
+pub use routine::*;
 pub use store::Store;
 pub use types::*;
 
