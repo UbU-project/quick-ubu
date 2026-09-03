@@ -56,6 +56,53 @@ fn add_pin_persists_a_scheduled_pinned_task() {
 }
 
 #[test]
+fn add_category_sets_it_and_omitting_the_flag_defaults_to_none() {
+    let (directory, store_path) = temp_store();
+    let categorized = quick_ubu(
+        &store_path,
+        &[
+            "add",
+            "--title",
+            "Categorized task",
+            "--duration",
+            "30",
+            "--category",
+            "business",
+        ],
+    );
+    assert_success(&categorized);
+    let uncategorized = quick_ubu(
+        &store_path,
+        &["add", "--title", "Plain task", "--duration", "15"],
+    );
+    assert_success(&uncategorized);
+
+    let store: Store = serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
+    let categorized_task = store
+        .tasks
+        .values()
+        .find(|task| task.title == "Categorized task")
+        .unwrap();
+    let plain_task = store
+        .tasks
+        .values()
+        .find(|task| task.title == "Plain task")
+        .unwrap();
+    assert_eq!(categorized_task.category.as_deref(), Some("business"));
+    assert_eq!(plain_task.category, None);
+
+    let replanned = quick_ubu(
+        &store_path,
+        &["replan", "--horizon", "2099-01-01T00:00:00Z"],
+    );
+    assert_success(&replanned);
+    let replan_output = String::from_utf8(replanned.stdout).unwrap();
+    assert!(replan_output.contains("Categorized task  business"));
+
+    fs::remove_dir_all(directory).expect("temporary directory is removable");
+}
+
+#[test]
 fn next_prints_the_expected_dynamic_task_and_window() {
     let (directory, store_path) = temp_store();
     let pinned = quick_ubu(
@@ -114,7 +161,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             start_time: NaiveTime::from_hms_opt(6, 30, 0).unwrap(),
             duration: Duration::minutes(45),
             affect_cost: 2,
-            category: None,
+            category: Some("personal".to_string()),
             recurrence: Recurrence::Daily,
         },
         RoutineTemplate {
@@ -151,6 +198,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
     assert_success(&listed);
     let list_output = String::from_utf8(listed.stdout).unwrap();
     assert!(list_output.contains("Morning focus"));
+    assert!(list_output.contains("Morning focus  personal"));
     assert!(list_output.contains("user-shared"));
     assert!(list_output.contains("06:30:00"));
     assert!(list_output.contains("2700s"));
