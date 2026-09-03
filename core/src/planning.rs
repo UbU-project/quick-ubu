@@ -156,6 +156,7 @@ pub fn re_plan(
             .max(horizon_start);
         let mut sched_predecessors = Vec::new();
         let mut unresolved_hidden_precedence = false;
+        let mut predecessor_in_flight = false;
 
         for predecessor_id in &task.blocked_by {
             let predecessor = &store.tasks[predecessor_id];
@@ -176,6 +177,8 @@ pub fn re_plan(
                 sched_predecessors.push(*predecessor_id);
             } else if !visible_as_content(predecessor.tier, clearance) {
                 unresolved_hidden_precedence = true;
+            } else {
+                predecessor_in_flight = true;
             }
         }
 
@@ -183,6 +186,14 @@ pub fn re_plan(
             conflicts.push(Conflict {
                 item: task.id,
                 reason: "unresolved hidden precedence".to_string(),
+            });
+            continue;
+        }
+
+        if predecessor_in_flight {
+            conflicts.push(Conflict {
+                item: task.id,
+                reason: "predecessor in flight".to_string(),
             });
             continue;
         }
@@ -313,4 +324,86 @@ fn next_day_start(day: NaiveDate) -> DateTime<Utc> {
         .and_then(|next| next.and_hms_opt(0, 0, 0))
         .expect("the placement horizon must fit chrono's date range")
         .and_utc()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::{DeferPolicy, Provenance, Task, Tier};
+
+    fn id(value: u128) -> Id {
+        Uuid::from_u128(value)
+    }
+
+    fn at(seconds: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(1_700_000_000 + seconds, 0).unwrap()
+    }
+
+    fn task(value: u128, status: TaskStatus, blocked_by: Vec<Id>) -> Task {
+        Task {
+            id: id(value),
+            tier: Tier::UserShared,
+            title: format!("task-{value}"),
+            detail: None,
+            objective_ids: Vec::new(),
+            skills: Vec::new(),
+            affect_cost: 0,
+            est_duration: Duration::minutes(30),
+            due: None,
+            earliest_start: None,
+            blocked_by,
+            defer_policy: DeferPolicy::ReturnToBacklog,
+            status,
+            provenance: Provenance::Manual,
+            commitment: None,
+        }
+    }
+
+    fn plan_with_predecessor_status(status: TaskStatus) -> Plan {
+        let mut store = Store::new();
+        store.upsert_task(task(1, status, Vec::new()));
+        store.upsert_task(task(2, TaskStatus::Backlog, vec![id(1)]));
+
+        re_plan(
+            &store,
+            ComputeTarget::DesktopOllama,
+            at(0),
+            at(0),
+            &[],
+            &AffectBudget { cap: 10 },
+            &DeterministicPlacer,
+        )
+        .expect("the dependency graph is valid")
+    }
+
+    fn assert_predecessor_in_flight(status: TaskStatus) {
+        let plan = plan_with_predecessor_status(status);
+
+        assert!(!plan.entries.iter().any(|entry| entry.item == id(2)));
+        assert!(plan.conflicts.contains(&Conflict {
+            item: id(2),
+            reason: "predecessor in flight".to_string(),
+        }));
+    }
+
+    #[test]
+    fn active_predecessor_conflicts_and_excludes_dependent() {
+        assert_predecessor_in_flight(TaskStatus::Active);
+    }
+
+    #[test]
+    fn deferred_predecessor_conflicts_and_excludes_dependent() {
+        assert_predecessor_in_flight(TaskStatus::Deferred);
+    }
+
+    #[test]
+    fn done_predecessor_allows_dependent_to_be_scheduled() {
+        let plan = plan_with_predecessor_status(TaskStatus::Done);
+
+        assert!(plan.entries.iter().any(|entry| entry.item == id(2)));
+        assert!(!plan.conflicts.iter().any(|conflict| conflict.item == id(2)));
+    }
 }
