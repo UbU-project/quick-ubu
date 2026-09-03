@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
 
-use chrono::{DateTime, NaiveDate, Utc, Weekday};
+use chrono::{DateTime, Duration, NaiveDate, Utc, Weekday};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use gcal::{export_plan, GoogleCalendarTransport};
+use gcal::{export_plan, import_from_calendar, CalendarTransport, GoogleCalendarTransport};
 use ollama_planner::{OllamaHttpTransport, OllamaPlanner};
 use ubu_core::{
     generate_routine_tasks, re_plan, AffectBudget, ComputeTarget, DeterministicPlacer, Planner,
@@ -39,6 +39,7 @@ enum Command {
     RoutineList,
     Generate(GenerateArgs),
     Export(ExportArgs),
+    Import(ImportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -115,6 +116,22 @@ struct ExportArgs {
     credentials: PathBuf,
     #[arg(long, default_value = "token-cache.json")]
     token_cache: PathBuf,
+    #[arg(long)]
+    color_config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ImportArgs {
+    #[arg(long, default_value = "primary")]
+    calendar_id: String,
+    #[arg(long, default_value = "credentials.json")]
+    credentials: PathBuf,
+    #[arg(long, default_value = "token-cache.json")]
+    token_cache: PathBuf,
+    #[arg(long)]
+    from: Option<String>,
+    #[arg(long)]
+    to: Option<String>,
     #[arg(long)]
     color_config: Option<PathBuf>,
 }
@@ -296,6 +313,42 @@ fn run(cli: Cli) -> Result<(), String> {
             ))?;
             persist::save(&cli.store, &store)?;
             println!("created {}, updated {}", report.created, report.updated);
+        }
+        Command::Import(args) => {
+            let now = Utc::now();
+            let from = args
+                .from
+                .as_deref()
+                .map(logic::parse_datetime)
+                .transpose()?
+                .unwrap_or(now);
+            let to = args
+                .to
+                .as_deref()
+                .map(logic::parse_datetime)
+                .transpose()?
+                .unwrap_or(now + Duration::days(7));
+            let color_to_category = load_color_map(args.color_config.as_deref())?
+                .into_iter()
+                .map(|(category, color_id)| (color_id, category))
+                .collect();
+            let transport =
+                GoogleCalendarTransport::new(args.credentials, args.token_cache, args.calendar_id);
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| format!("failed to start async runtime: {error}"))?;
+            let events = runtime.block_on(transport.list_events(from, to))?;
+            let report = import_from_calendar(
+                &mut store,
+                &events,
+                now,
+                Tier::UserShared,
+                &color_to_category,
+            );
+            persist::save(&cli.store, &store)?;
+            println!(
+                "captured {}, completed {}, moved {}",
+                report.captured, report.completed, report.moved
+            );
         }
     }
 
