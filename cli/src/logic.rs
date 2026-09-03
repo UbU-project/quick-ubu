@@ -15,6 +15,7 @@ pub struct AddInput {
     pub due: Option<DateTime<Utc>>,
     pub earliest_start: Option<DateTime<Utc>>,
     pub pin: Option<DateTime<Utc>>,
+    pub category: Option<String>,
     pub objective_prefixes: Vec<String>,
     pub blocked_by_prefixes: Vec<String>,
 }
@@ -44,6 +45,7 @@ pub struct ReplanOutput {
 pub struct ScheduleRow {
     pub id: Id,
     pub title: String,
+    pub category: Option<String>,
     pub window: TimeWindow,
 }
 
@@ -107,7 +109,7 @@ pub fn add(store: &mut Store, input: AddInput) -> Result<Id, String> {
         est_duration: duration,
         due: input.due,
         earliest_start: input.earliest_start,
-        category: None,
+        category: input.category,
         pinned,
         blocked_by,
         defer_policy: DeferPolicy::RescheduleAsap,
@@ -187,6 +189,7 @@ pub fn replan_with_planner(
         .map(|entry| ScheduleRow {
             id: entry.item,
             title: task_title(store, entry.item),
+            category: task_category(store, entry.item),
             window: entry.window,
         })
         .collect::<Vec<_>>();
@@ -244,6 +247,7 @@ pub fn next(
             .map(|entry| ScheduleRow {
                 id: task_id,
                 title: task_title(store, task_id),
+                category: task_category(store, task_id),
                 window: entry.window.clone(),
             })
     }))
@@ -265,6 +269,13 @@ fn task_title(store: &Store, id: Id) -> String {
         .get(&id)
         .map(|task| task.title.clone())
         .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn task_category(store: &Store, id: Id) -> Option<String> {
+    store
+        .tasks
+        .get(&id)
+        .and_then(|task| task.category.clone())
 }
 
 #[cfg(test)]
@@ -305,6 +316,7 @@ mod tests {
                 due: None,
                 earliest_start: None,
                 pin: None,
+                category: None,
                 objective_prefixes: vec![objective_id.simple().to_string()[..8].to_string()],
                 blocked_by_prefixes: Vec::new(),
             },
@@ -342,6 +354,7 @@ mod tests {
                 due: None,
                 earliest_start: None,
                 pin: None,
+                category: None,
                 objective_prefixes: Vec::new(),
                 blocked_by_prefixes: Vec::new(),
             },

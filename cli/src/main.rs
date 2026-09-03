@@ -54,6 +54,8 @@ struct AddArgs {
     #[arg(long)]
     pin: Option<String>,
     #[arg(long)]
+    category: Option<String>,
+    #[arg(long)]
     objective: Vec<String>,
     #[arg(long)]
     blocked_by: Vec<String>,
@@ -132,6 +134,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     due: parse_optional_datetime(args.due)?,
                     earliest_start: parse_optional_datetime(args.earliest_start)?,
                     pin: parse_optional_datetime(args.pin)?,
+                    category: args.category,
                     objective_prefixes: args.objective,
                     blocked_by_prefixes: args.blocked_by,
                 },
@@ -229,9 +232,10 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::RoutineList => {
             for routine in store.routines().values() {
                 println!(
-                    "{}  {}  {}  {}  {}s  {}",
+                    "{}  {}  {}  {}  {}  {}s  {}",
                     short_id(routine.id),
                     routine.title,
+                    routine.category.as_deref().unwrap_or(""),
                     tier_name(routine.tier),
                     routine.start_time,
                     routine.duration.num_seconds(),
@@ -263,10 +267,11 @@ fn print_replan(output: logic::ReplanOutput) {
     println!("Schedule:");
     for entry in output.schedule {
         println!(
-            "{}–{}  {} ({})",
+            "{}–{}  {}  {} ({})",
             entry.window.start.format("%H:%M"),
             entry.window.end.format("%H:%M"),
             entry.title,
+            entry.category.as_deref().unwrap_or(""),
             short_id(entry.id)
         );
     }

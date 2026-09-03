@@ -113,7 +113,7 @@ pub fn expand_routine(
                 est_duration: template.duration,
                 due: None,
                 earliest_start: None,
-                category: None,
+                category: template.category.clone(),
                 pinned: Some(TimeWindow { start, end }),
                 blocked_by: Vec::new(),
                 defer_policy: DeferPolicy::RescheduleAsap,
