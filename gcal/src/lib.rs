@@ -5,11 +5,15 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use ubu_core::{visible_as_content, Plan, Store, Tier};
+use ubu_core::{
+    log_actual, log_capture, log_edit_pin, reconcile, visible_as_content, ActualStatus,
+    DeferPolicy, Id, Plan, Provenance, Store, Task, TaskStatus, Tier, TimeWindow,
+};
 use yup_oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};
 
 const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar";
 const CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3/calendars";
+const CAPTURE_NAMESPACE: Id = Id::from_u128(0xfbb8_2411_158b_4a86_9f69_42d19fec7587);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarEvent {
@@ -318,6 +322,98 @@ pub async fn export_plan<T: CalendarTransport>(
     }
 
     Ok(report)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportReport {
+    pub captured: usize,
+    pub completed: usize,
+    pub moved: usize,
+}
+
+pub fn import_from_calendar(
+    store: &mut Store,
+    events: &[FetchedEvent],
+    now: DateTime<Utc>,
+    captured_tier: Tier,
+    color_to_category: &BTreeMap<String, String>,
+) -> ImportReport {
+    let event_to_task: BTreeMap<String, Id> = store
+        .calendar_links
+        .iter()
+        .map(|(task_id, event_id)| (event_id.clone(), *task_id))
+        .collect();
+    let mut entries = Vec::new();
+    let mut captured_links = Vec::new();
+    let mut report = ImportReport {
+        captured: 0,
+        completed: 0,
+        moved: 0,
+    };
+
+    for event in events {
+        let window = TimeWindow {
+            start: event.start,
+            end: event.end,
+        };
+        if let Some(task_id) = event_to_task.get(&event.id).copied() {
+            let Some(task) = store.tasks.get(&task_id) else {
+                continue;
+            };
+            if task.pinned.is_none() {
+                if event.color_id.is_some() && task.status != TaskStatus::Done {
+                    entries.push(log_actual(task_id, ActualStatus::Done, Some(window), now));
+                    report.completed += 1;
+                }
+            } else if task.pinned.as_ref() != Some(&window) {
+                entries.push(log_edit_pin(task_id, Some(window), now));
+                report.moved += 1;
+            }
+            continue;
+        }
+
+        let task_id = Id::new_v5(&CAPTURE_NAMESPACE, event.id.as_bytes());
+        let is_commitment = event.color_id.is_some();
+        let category = event
+            .color_id
+            .as_ref()
+            .and_then(|color_id| color_to_category.get(color_id))
+            .cloned();
+        let task = Task {
+            id: task_id,
+            tier: captured_tier,
+            title: event.summary.clone(),
+            detail: None,
+            objective_ids: Vec::new(),
+            skills: Vec::new(),
+            affect_cost: 0,
+            est_duration: event.end - event.start,
+            due: None,
+            earliest_start: None,
+            category: if is_commitment { category } else { None },
+            pinned: is_commitment.then_some(window),
+            blocked_by: Vec::new(),
+            defer_policy: DeferPolicy::RescheduleAsap,
+            status: if is_commitment {
+                TaskStatus::Scheduled
+            } else {
+                TaskStatus::Backlog
+            },
+            provenance: Provenance::Manual,
+            commitment: None,
+        };
+        entries.push(log_capture(task, now));
+        captured_links.push((task_id, event.id.clone()));
+        report.captured += 1;
+    }
+
+    reconcile(store, &entries).expect("calendar import entries must reference known tasks");
+    for (task_id, event_id) in captured_links {
+        store.upsert_calendar_link(task_id, event_id);
+    }
+    store.log.extend(entries);
+
+    report
 }
 
 #[cfg(test)]
