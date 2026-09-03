@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ubu_core::{Id, Store};
 
@@ -24,10 +24,30 @@ pub fn save(path: &Path, store: &Store) -> Result<(), String> {
             .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     }
 
-    let contents = serde_json::to_string_pretty(store)
-        .map_err(|error| format!("failed to serialize store: {error}"))?;
-    fs::write(path, contents)
-        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+    let temp_path = temp_sibling(path);
+    let contents = match serde_json::to_string_pretty(store) {
+        Ok(contents) => contents,
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            return Err(format!("failed to serialize store: {error}"));
+        }
+    };
+    if let Err(error) = fs::write(&temp_path, contents) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!("failed to write {}: {error}", path.display()));
+    }
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!("failed to replace {}: {error}", path.display()));
+    }
+
+    Ok(())
+}
+
+fn temp_sibling(path: &Path) -> PathBuf {
+    let mut temp_path = path.as_os_str().to_os_string();
+    temp_path.push(".tmp");
+    PathBuf::from(temp_path)
 }
 
 pub fn resolve_task_id(store: &Store, prefix: &str) -> Result<Id, String> {
@@ -72,6 +92,28 @@ mod tests {
 
         assert_eq!(loaded, store);
         std::fs::remove_dir_all(directory).expect("temporary directory should be removable");
+    }
+
+    #[test]
+    fn save_atomically_replaces_existing_file_without_leaving_temp_sibling() {
+        let directory = std::env::temp_dir().join(format!("quick-ubu-{}", Uuid::new_v4()));
+        let path = directory.join("store.json");
+        fs::create_dir_all(&directory).expect("temporary directory should be creatable");
+        fs::write(&path, "old incomplete content").expect("existing file should be writable");
+
+        let objective_id = Uuid::from_u128(100);
+        let task_id = Uuid::from_u128(1);
+        let mut store = Store::new();
+        store.upsert_objective(objective(objective_id, "Atomic save"));
+        store.upsert_task(task(task_id, "Replace old content", vec![objective_id]));
+        let expected = serde_json::to_string_pretty(&store).expect("store should serialize");
+
+        save(&path, &store).expect("store should atomically replace existing file");
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+        assert_eq!(load(&path), Ok(store));
+        assert!(!temp_sibling(&path).exists());
+        fs::remove_dir_all(directory).expect("temporary directory should be removable");
     }
 
     #[test]
