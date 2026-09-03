@@ -16,6 +16,9 @@ pub struct Store {
     pub routines: BTreeMap<Id, RoutineTemplate>,
     pub bundles: BTreeMap<Id, Bundle>,
     pub preferences: Vec<Preference>,
+    /// task id -> Google Calendar event id, for idempotent create-or-update.
+    #[serde(default)]
+    pub calendar_links: BTreeMap<Id, String>,
     /// append-only SessionLog
     pub log: Vec<LogEntry>,
 }
@@ -91,6 +94,14 @@ impl Store {
 
     pub fn preferences(&self) -> &[Preference] {
         &self.preferences
+    }
+
+    pub fn upsert_calendar_link(&mut self, task_id: Id, event_id: String) -> Option<String> {
+        self.calendar_links.insert(task_id, event_id)
+    }
+
+    pub fn calendar_link(&self, task_id: Id) -> Option<&String> {
+        self.calendar_links.get(&task_id)
     }
 
     pub fn append_log(&mut self, entry: LogEntry) {
