@@ -19,11 +19,26 @@ pub struct CalendarEvent {
     pub color_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedEvent {
+    pub id: String,
+    pub summary: String,
+    pub color_id: Option<String>,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
 #[allow(async_fn_in_trait)]
 pub trait CalendarTransport {
     async fn create_event(&self, event: &CalendarEvent) -> Result<String, String>;
 
     async fn update_event(&self, event_id: &str, event: &CalendarEvent) -> Result<(), String>;
+
+    async fn list_events(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<FetchedEvent>, String>;
 }
 
 /// Real Google transport. This code is compiled, but automated tests never
@@ -112,7 +127,7 @@ struct GoogleEventBody {
     color_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct GoogleEventTime {
     #[serde(rename = "dateTime")]
     date_time: String,
@@ -136,6 +151,41 @@ impl From<&CalendarEvent> for GoogleEventBody {
 #[derive(Deserialize)]
 struct CreatedEvent {
     id: String,
+}
+
+#[derive(Deserialize)]
+struct ListedEvents {
+    #[serde(default)]
+    items: Vec<ListedEvent>,
+}
+
+#[derive(Deserialize)]
+struct ListedEvent {
+    id: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(rename = "colorId")]
+    color_id: Option<String>,
+    start: GoogleEventTime,
+    end: GoogleEventTime,
+}
+
+impl TryFrom<ListedEvent> for FetchedEvent {
+    type Error = String;
+
+    fn try_from(event: ListedEvent) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: event.id,
+            summary: event.summary,
+            color_id: event.color_id,
+            start: DateTime::parse_from_rfc3339(&event.start.date_time)
+                .map_err(|error| format!("invalid Google Calendar start dateTime: {error}"))?
+                .with_timezone(&Utc),
+            end: DateTime::parse_from_rfc3339(&event.end.date_time)
+                .map_err(|error| format!("invalid Google Calendar end dateTime: {error}"))?
+                .with_timezone(&Utc),
+        })
+    }
 }
 
 impl CalendarTransport for GoogleCalendarTransport {
@@ -175,6 +225,42 @@ impl CalendarTransport for GoogleCalendarTransport {
         }
 
         Ok(())
+    }
+
+    /// Compiled but not exercised by automated tests; live behavior is verified
+    /// by the operator against Google Calendar.
+    async fn list_events(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<FetchedEvent>, String> {
+        let token = self.access_token().await?;
+        let query = [
+            ("timeMin", from.to_rfc3339()),
+            ("timeMax", to.to_rfc3339()),
+            ("singleEvents", "true".to_string()),
+        ];
+        let response = self
+            .client
+            .get(self.event_url(None))
+            .bearer_auth(token)
+            .query(&query)
+            .send()
+            .await
+            .map_err(|error| format!("failed to list Google Calendar events: {error}"))?;
+        if !response.status().is_success() {
+            return Err(Self::response_error(response).await);
+        }
+
+        let events = response
+            .json::<ListedEvents>()
+            .await
+            .map_err(|error| format!("failed to parse Google Calendar events: {error}"))?;
+        events
+            .items
+            .into_iter()
+            .map(FetchedEvent::try_from)
+            .collect()
     }
 }
 
@@ -251,6 +337,7 @@ struct StubTransport {
     next_id: std::cell::Cell<usize>,
     create_error: Option<String>,
     update_error: Option<String>,
+    listed_events: Vec<FetchedEvent>,
 }
 
 #[cfg(test)]
@@ -265,6 +352,13 @@ impl StubTransport {
     fn with_update_error(error: &str) -> Self {
         Self {
             update_error: Some(error.to_string()),
+            ..Self::default()
+        }
+    }
+
+    fn with_events(events: Vec<FetchedEvent>) -> Self {
+        Self {
+            listed_events: events,
             ..Self::default()
         }
     }
@@ -295,6 +389,14 @@ impl CalendarTransport for StubTransport {
         }
 
         Ok(())
+    }
+
+    async fn list_events(
+        &self,
+        _from: DateTime<Utc>,
+        _to: DateTime<Utc>,
+    ) -> Result<Vec<FetchedEvent>, String> {
+        Ok(self.listed_events.clone())
     }
 }
 
@@ -336,6 +438,27 @@ mod stub_tests {
             update_stub.calls.borrow().as_slice(),
             [StubCall::Update { event_id, .. }] if event_id == "known"
         ));
+    }
+
+    #[tokio::test]
+    async fn stub_transport_lists_configured_events() {
+        let expected = FetchedEvent {
+            id: "google-event".to_string(),
+            summary: "Fetched".to_string(),
+            color_id: Some("5".to_string()),
+            start: DateTime::from_timestamp(0, 0).unwrap(),
+            end: DateTime::from_timestamp(60, 0).unwrap(),
+        };
+        let stub = StubTransport::with_events(vec![expected.clone()]);
+
+        assert_eq!(
+            stub.list_events(
+                DateTime::from_timestamp(0, 0).unwrap(),
+                DateTime::from_timestamp(120, 0).unwrap(),
+            )
+            .await,
+            Ok(vec![expected])
+        );
     }
 
     fn id(value: u128) -> Id {
