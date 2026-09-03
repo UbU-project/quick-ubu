@@ -1,9 +1,15 @@
 //! Google Calendar export behind a transport boundary.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use ubu_core::{visible_as_content, Plan, Store, Tier};
+use yup_oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};
+
+const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar";
+const CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3/calendars";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarEvent {
@@ -13,10 +19,163 @@ pub struct CalendarEvent {
     pub color_id: Option<String>,
 }
 
+#[allow(async_fn_in_trait)]
 pub trait CalendarTransport {
     async fn create_event(&self, event: &CalendarEvent) -> Result<String, String>;
 
     async fn update_event(&self, event_id: &str, event: &CalendarEvent) -> Result<(), String>;
+}
+
+/// Real Google transport. This code is compiled, but automated tests never
+/// exercise it; the operator must verify credentials, OAuth, and API behavior at
+/// runtime against a live Google Calendar endpoint.
+pub struct GoogleCalendarTransport {
+    credentials_path: PathBuf,
+    token_cache_path: PathBuf,
+    calendar_id: String,
+    client: reqwest::Client,
+}
+
+impl GoogleCalendarTransport {
+    pub fn new(
+        credentials_path: impl Into<PathBuf>,
+        token_cache_path: impl Into<PathBuf>,
+        calendar_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            credentials_path: credentials_path.into(),
+            token_cache_path: token_cache_path.into(),
+            calendar_id: calendar_id.into(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    async fn access_token(&self) -> Result<String, String> {
+        let secret = yup_oauth2::read_application_secret(&self.credentials_path)
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to read Google credentials {}: {error}",
+                    self.credentials_path.display()
+                )
+            })?;
+        let authenticator =
+            InstalledFlowAuthenticator::builder(secret, InstalledFlowReturnMethod::HTTPRedirect)
+                .persist_tokens_to_disk(&self.token_cache_path)
+                .build()
+                .await
+                .map_err(|error| format!("failed to initialize Google OAuth: {error}"))?;
+        let token = authenticator
+            .token(&[CALENDAR_SCOPE])
+            .await
+            .map_err(|error| format!("failed to obtain Google OAuth token: {error}"))?;
+
+        token
+            .token()
+            .map(str::to_owned)
+            .ok_or_else(|| "Google OAuth returned no access token".to_string())
+    }
+
+    fn event_url(&self, event_id: Option<&str>) -> reqwest::Url {
+        let mut url = reqwest::Url::parse(CALENDAR_API_BASE)
+            .expect("the constant Google Calendar API URL is valid");
+        let mut segments = url
+            .path_segments_mut()
+            .expect("the Google Calendar API URL supports path segments");
+        segments
+            .pop_if_empty()
+            .push(&self.calendar_id)
+            .push("events");
+        if let Some(event_id) = event_id {
+            segments.push(event_id);
+        }
+        drop(segments);
+        url
+    }
+
+    async fn response_error(response: reqwest::Response) -> String {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|error| format!("failed to read response body: {error}"));
+        format!("Google Calendar API returned {status}: {body}")
+    }
+}
+
+#[derive(Serialize)]
+struct GoogleEventBody {
+    summary: String,
+    start: GoogleEventTime,
+    end: GoogleEventTime,
+    #[serde(rename = "colorId", skip_serializing_if = "Option::is_none")]
+    color_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GoogleEventTime {
+    #[serde(rename = "dateTime")]
+    date_time: String,
+}
+
+impl From<&CalendarEvent> for GoogleEventBody {
+    fn from(event: &CalendarEvent) -> Self {
+        Self {
+            summary: event.summary.clone(),
+            start: GoogleEventTime {
+                date_time: event.start.to_rfc3339(),
+            },
+            end: GoogleEventTime {
+                date_time: event.end.to_rfc3339(),
+            },
+            color_id: event.color_id.clone(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CreatedEvent {
+    id: String,
+}
+
+impl CalendarTransport for GoogleCalendarTransport {
+    async fn create_event(&self, event: &CalendarEvent) -> Result<String, String> {
+        let token = self.access_token().await?;
+        let response = self
+            .client
+            .post(self.event_url(None))
+            .bearer_auth(token)
+            .json(&GoogleEventBody::from(event))
+            .send()
+            .await
+            .map_err(|error| format!("failed to create Google Calendar event: {error}"))?;
+        if !response.status().is_success() {
+            return Err(Self::response_error(response).await);
+        }
+
+        response
+            .json::<CreatedEvent>()
+            .await
+            .map(|created| created.id)
+            .map_err(|error| format!("failed to parse created Google Calendar event: {error}"))
+    }
+
+    async fn update_event(&self, event_id: &str, event: &CalendarEvent) -> Result<(), String> {
+        let token = self.access_token().await?;
+        let response = self
+            .client
+            .patch(self.event_url(Some(event_id)))
+            .bearer_auth(token)
+            .json(&GoogleEventBody::from(event))
+            .send()
+            .await
+            .map_err(|error| format!("failed to update Google Calendar event: {error}"))?;
+        if !response.status().is_success() {
+            return Err(Self::response_error(response).await);
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
