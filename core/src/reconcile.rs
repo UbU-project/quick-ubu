@@ -60,6 +60,14 @@ pub fn log_edit_due(task_id: Id, due: Option<DateTime<Utc>>, at: DateTime<Utc>) 
     }
 }
 
+pub fn log_edit_pin(task_id: Id, pinned: Option<TimeWindow>, at: DateTime<Utc>) -> LogEntry {
+    LogEntry {
+        id: Uuid::new_v4(),
+        kind: LogEntryKind::Command(CommandKind::EditPin { task_id, pinned }),
+        at,
+    }
+}
+
 pub fn log_edit_pref(pref: Preference, remove: bool, at: DateTime<Utc>) -> LogEntry {
     LogEntry {
         id: Uuid::new_v4(),
@@ -121,6 +129,13 @@ pub fn reconcile(store: &mut Store, log: &[LogEntry]) -> Result<(), CoreError> {
                     .get_mut(task_id)
                     .ok_or(CoreError::UnknownTask { id: *task_id })?;
                 task.due = *due;
+            }
+            LogEntryKind::Command(CommandKind::EditPin { task_id, pinned }) => {
+                let task = store
+                    .tasks
+                    .get_mut(task_id)
+                    .ok_or(CoreError::UnknownTask { id: *task_id })?;
+                task.pinned = pinned.clone();
             }
             LogEntryKind::Command(CommandKind::EditPref { pref, remove }) => {
                 if *remove {
