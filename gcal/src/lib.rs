@@ -301,6 +301,10 @@ impl CalendarTransport for StubTransport {
 #[cfg(test)]
 mod stub_tests {
     use super::*;
+    use chrono::Duration;
+    use ubu_core::{
+        DeferPolicy, Id, PlanAuthority, Provenance, ScheduleEntry, Task, TaskStatus, TimeWindow,
+    };
 
     fn event() -> CalendarEvent {
         CalendarEvent {
@@ -332,5 +336,223 @@ mod stub_tests {
             update_stub.calls.borrow().as_slice(),
             [StubCall::Update { event_id, .. }] if event_id == "known"
         ));
+    }
+
+    fn id(value: u128) -> Id {
+        Id::from_u128(value)
+    }
+
+    fn at(minutes: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(minutes * 60, 0).unwrap()
+    }
+
+    fn task(value: u128, title: &str, tier: Tier, pinned: bool, category: Option<&str>) -> Task {
+        Task {
+            id: id(value),
+            tier,
+            title: title.to_string(),
+            detail: Some(format!("detail for {title}")),
+            objective_ids: Vec::new(),
+            skills: vec!["private skill".to_string()],
+            affect_cost: 0,
+            est_duration: Duration::minutes(30),
+            due: None,
+            earliest_start: None,
+            category: category.map(str::to_owned),
+            pinned: pinned.then(|| TimeWindow {
+                start: at(value as i64),
+                end: at(value as i64 + 30),
+            }),
+            blocked_by: Vec::new(),
+            defer_policy: DeferPolicy::RescheduleAsap,
+            status: TaskStatus::Scheduled,
+            provenance: Provenance::Manual,
+            commitment: None,
+        }
+    }
+
+    fn plan(task_ids: &[u128]) -> Plan {
+        Plan {
+            id: id(10_000),
+            created_at: at(0),
+            authority: PlanAuthority::Authoritative,
+            clearance: Tier::TopSecret,
+            entries: task_ids
+                .iter()
+                .enumerate()
+                .map(|(index, value)| ScheduleEntry {
+                    item: id(*value),
+                    window: TimeWindow {
+                        start: at(index as i64 * 30),
+                        end: at(index as i64 * 30 + 30),
+                    },
+                    is_handle: false,
+                })
+                .collect(),
+            objective_etas: BTreeMap::new(),
+            conflicts: Vec::new(),
+        }
+    }
+
+    fn call_event(call: &StubCall) -> &CalendarEvent {
+        match call {
+            StubCall::Create(event) | StubCall::Update { event, .. } => event,
+        }
+    }
+
+    #[tokio::test]
+    async fn export_creates_one_event_per_entry_and_populates_links() {
+        let mut store = Store::new();
+        store.upsert_task(task(1, "First", Tier::UserShared, false, None));
+        store.upsert_task(task(2, "Second", Tier::UserShared, false, None));
+        let plan = plan(&[2, 1]);
+        let transport = StubTransport::default();
+
+        let report = export_plan(
+            &mut store,
+            &plan,
+            &transport,
+            &BTreeMap::new(),
+            Tier::UserShared,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report,
+            ExportReport {
+                created: 2,
+                updated: 0,
+            }
+        );
+        assert_eq!(store.calendar_links.len(), 2);
+        assert_eq!(
+            store.calendar_link(id(2)).map(String::as_str),
+            Some("event-1")
+        );
+        assert_eq!(
+            store.calendar_link(id(1)).map(String::as_str),
+            Some("event-2")
+        );
+        let calls = transport.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|call| matches!(call, StubCall::Create(_))));
+        assert_eq!(call_event(&calls[0]).summary, "Second");
+        assert_eq!(call_event(&calls[1]).summary, "First");
+    }
+
+    #[tokio::test]
+    async fn second_export_updates_every_existing_event_without_creating() {
+        let mut store = Store::new();
+        store.upsert_task(task(1, "First", Tier::UserShared, false, None));
+        store.upsert_task(task(2, "Second", Tier::UserShared, false, None));
+        let plan = plan(&[1, 2]);
+        let transport = StubTransport::default();
+        export_plan(
+            &mut store,
+            &plan,
+            &transport,
+            &BTreeMap::new(),
+            Tier::UserShared,
+        )
+        .await
+        .unwrap();
+        transport.calls.borrow_mut().clear();
+
+        let report = export_plan(
+            &mut store,
+            &plan,
+            &transport,
+            &BTreeMap::new(),
+            Tier::UserShared,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report,
+            ExportReport {
+                created: 0,
+                updated: 2,
+            }
+        );
+        let calls = transport.calls.borrow();
+        assert!(matches!(
+            calls.as_slice(),
+            [
+                StubCall::Update { event_id: first, .. },
+                StubCall::Update { event_id: second, .. }
+            ] if first == "event-1" && second == "event-2"
+        ));
+    }
+
+    #[tokio::test]
+    async fn top_secret_content_never_reaches_the_transport() {
+        const SECRET_TITLE: &str = "Never transmit this title";
+        let mut store = Store::new();
+        store.upsert_task(task(
+            1,
+            SECRET_TITLE,
+            Tier::TopSecret,
+            true,
+            Some("secret-category"),
+        ));
+        store.upsert_task(task(2, "Visible title", Tier::UserShared, false, None));
+        let transport = StubTransport::default();
+
+        export_plan(
+            &mut store,
+            &plan(&[1, 2]),
+            &transport,
+            &BTreeMap::from([("secret-category".to_string(), "11".to_string())]),
+            Tier::UserShared,
+        )
+        .await
+        .unwrap();
+
+        let calls = transport.calls.borrow();
+        let events: Vec<&CalendarEvent> = calls.iter().map(call_event).collect();
+        assert!(events.iter().all(|event| event.summary != SECRET_TITLE));
+        assert!(events
+            .iter()
+            .any(|event| event.summary == "Busy" && event.color_id.is_none()));
+    }
+
+    #[tokio::test]
+    async fn only_pinned_tasks_receive_their_mapped_category_color() {
+        let mut store = Store::new();
+        store.upsert_task(task(1, "Pinned", Tier::UserShared, true, Some("personal")));
+        store.upsert_task(task(
+            2,
+            "Dynamic",
+            Tier::UserShared,
+            false,
+            Some("personal"),
+        ));
+        let transport = StubTransport::default();
+
+        export_plan(
+            &mut store,
+            &plan(&[1, 2]),
+            &transport,
+            &BTreeMap::from([("personal".to_string(), "5".to_string())]),
+            Tier::UserShared,
+        )
+        .await
+        .unwrap();
+
+        let calls = transport.calls.borrow();
+        let pinned = calls
+            .iter()
+            .map(call_event)
+            .find(|event| event.summary == "Pinned")
+            .unwrap();
+        let dynamic = calls
+            .iter()
+            .map(call_event)
+            .find(|event| event.summary == "Dynamic")
+            .unwrap();
+        assert_eq!(pinned.color_id.as_deref(), Some("5"));
+        assert_eq!(dynamic.color_id, None);
     }
 }
