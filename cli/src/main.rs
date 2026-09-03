@@ -1,10 +1,14 @@
+use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc, Weekday};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ollama_planner::{OllamaHttpTransport, OllamaPlanner};
-use ubu_core::{Planner, TaskStatus, Tier};
+use ubu_core::{
+    generate_routine_tasks, Planner, Recurrence, RoutineTemplate, TaskStatus, Tier, Tz,
+};
 
 mod logic;
 mod persist;
@@ -28,6 +32,9 @@ enum Command {
     ObjectiveAdd(ObjectiveAddArgs),
     Replan(ReplanArgs),
     Next(NextArgs),
+    RoutineImport { path: PathBuf },
+    RoutineList,
+    Generate(GenerateArgs),
 }
 
 #[derive(Debug, Args)]
@@ -82,6 +89,16 @@ struct ReplanArgs {
 struct NextArgs {
     #[arg(long, default_value_t = 100)]
     affect_cap: i32,
+}
+
+#[derive(Debug, Args)]
+struct GenerateArgs {
+    #[arg(long)]
+    from: Option<String>,
+    #[arg(long, default_value_t = 7)]
+    days: u32,
+    #[arg(long, default_value = "America/New_York")]
+    tz: String,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -197,6 +214,42 @@ fn run(cli: Cli) -> Result<(), String> {
                 .map_err(|error| format!("next failed: {error:?}"))?;
             print_next(output);
         }
+        Command::RoutineImport { path } => {
+            let contents = fs::read_to_string(&path)
+                .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+            let routines: Vec<RoutineTemplate> = serde_json::from_str(&contents)
+                .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+            let imported = routines.len();
+            for routine in routines {
+                store.upsert_routine(routine);
+            }
+            persist::save(&cli.store, &store)?;
+            println!("imported {imported}");
+        }
+        Command::RoutineList => {
+            for routine in store.routines().values() {
+                println!(
+                    "{}  {}  {}  {}  {}s  {}",
+                    short_id(routine.id),
+                    routine.title,
+                    tier_name(routine.tier),
+                    routine.start_time,
+                    routine.duration.num_seconds(),
+                    recurrence_summary(&routine.recurrence)
+                );
+            }
+        }
+        Command::Generate(args) => {
+            let tz = Tz::from_str(&args.tz).map_err(|_| format!("invalid timezone {}", args.tz))?;
+            let from = match args.from {
+                Some(value) => NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+                    .map_err(|error| format!("invalid date {value}: {error}"))?,
+                None => Utc::now().with_timezone(&tz).date_naive(),
+            };
+            let report = generate_routine_tasks(&mut store, from, args.days, tz);
+            persist::save(&cli.store, &store)?;
+            println!("created {}, skipped {}", report.created, report.skipped);
+        }
     }
 
     Ok(())
@@ -248,6 +301,27 @@ fn print_next(output: Option<logic::ScheduleRow>) {
             short_id(entry.id)
         ),
         None => println!("nothing ready"),
+    }
+}
+
+fn recurrence_summary(recurrence: &Recurrence) -> String {
+    match recurrence {
+        Recurrence::Daily => "Daily".to_string(),
+        Recurrence::Weekly { weekdays } => format!(
+            "Weekly[{}]",
+            weekdays
+                .iter(Weekday::Mon)
+                .map(|weekday| format!("{weekday:?}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Recurrence::MonthlyDay { days } => format!(
+            "MonthlyDay[{}]",
+            days.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
     }
 }
 

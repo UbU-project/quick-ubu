@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use chrono::{Datelike, Days, Duration, NaiveDate, NaiveTime, TimeZone, Utc, Weekday, WeekdaySet};
-use chrono_tz::Tz;
+pub use chrono_tz::Tz;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
