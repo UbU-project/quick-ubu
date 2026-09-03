@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 
 use crate::plan::{ComputeTarget, Plan, PlanAuthority};
-use crate::planning::{re_plan, DeterministicPlacer};
+use crate::planning::{next_task, re_plan, DeterministicPlacer};
 use crate::precompute::{
     affect_violations, resolve_preferences, topo_order, AffectBudget, AffectViolation, WindowKey,
 };
@@ -639,6 +639,224 @@ proptest! {
         let store = store_from_graph(&graph);
         prop_assert_eq!(topo_order(&store), topo_order(&store));
     }
+}
+
+// ----------------------------------------------------- pinned commitments --
+
+fn pinned_task(n: u128, start: i64, end: i64) -> Task {
+    Task {
+        status: TaskStatus::Scheduled,
+        pinned: Some(TimeWindow {
+            start: at(start),
+            end: at(end),
+        }),
+        ..task(n)
+    }
+}
+
+#[test]
+fn pinned_task_is_emitted_at_its_window_and_dynamic_task_uses_a_gap() {
+    let pinned = Task {
+        objective_ids: vec![id(100)],
+        ..pinned_task(1, 3_600, 7_200)
+    };
+    let pinned_window = pinned.pinned.clone().unwrap();
+    let dynamic = Task {
+        est_duration: chrono::Duration::minutes(90),
+        ..task(2)
+    };
+    let mut store = store_with_tasks(vec![pinned, dynamic]);
+    store.upsert_objective(objective(100));
+
+    let plan = re_plan(
+        &store,
+        ComputeTarget::DesktopOllama,
+        at(0),
+        at(0),
+        &[],
+        &AffectBudget { cap: 10 },
+        &DeterministicPlacer,
+    )
+    .expect("valid store");
+
+    assert_eq!(entry(&plan, id(1)).window, pinned_window);
+    assert_eq!(plan.objective_etas[&id(100)], Some(pinned_window.end));
+    assert_eq!(
+        plan.entries.iter().map(|entry| entry.item).collect::<Vec<_>>(),
+        vec![id(1), id(2)]
+    );
+    let dynamic_window = &entry(&plan, id(2)).window;
+    assert!(
+        dynamic_window.end <= pinned_window.start || pinned_window.end <= dynamic_window.start
+    );
+}
+
+proptest! {
+    #[test]
+    fn prop_unpinned_task_never_overlaps_a_random_pinned_window(
+        pin_start_minutes in 0i64..720,
+        pin_duration_minutes in 1i64..241,
+        dynamic_duration_minutes in 1i64..301,
+    ) {
+        let pin_start = pin_start_minutes * 60;
+        let pin_end = pin_start + pin_duration_minutes * 60;
+        let pinned = pinned_task(1, pin_start, pin_end);
+        let pinned_window = pinned.pinned.clone().unwrap();
+        let dynamic = Task {
+            est_duration: chrono::Duration::minutes(dynamic_duration_minutes),
+            ..task(2)
+        };
+        let store = store_with_tasks(vec![pinned, dynamic]);
+
+        let plan = re_plan(
+            &store,
+            ComputeTarget::DesktopOllama,
+            at(0),
+            at(0),
+            &[],
+            &AffectBudget { cap: 10 },
+            &DeterministicPlacer,
+        ).expect("valid store");
+
+        prop_assert_eq!(&entry(&plan, id(1)).window, &pinned_window);
+        let dynamic_window = &entry(&plan, id(2)).window;
+        prop_assert!(
+            dynamic_window.end <= pinned_window.start
+                || pinned_window.end <= dynamic_window.start
+        );
+    }
+}
+
+#[test]
+fn unpinned_task_blocked_by_pinned_task_starts_after_pinned_end() {
+    let store = store_with_tasks(vec![pinned_task(1, 3_600, 7_200), blocked(2, &[1])]);
+
+    let plan = re_plan(
+        &store,
+        ComputeTarget::DesktopOllama,
+        at(0),
+        at(0),
+        &[],
+        &AffectBudget { cap: 10 },
+        &DeterministicPlacer,
+    )
+    .expect("valid store");
+
+    assert!(entry(&plan, id(2)).window.start >= at(7_200));
+    assert!(!plan.conflicts.iter().any(|conflict| conflict.item == id(2)));
+}
+
+#[test]
+fn next_task_selects_earliest_unpinned_unfinished_entry() {
+    let mut store = store_with_tasks(vec![task(1), task(2), task(4), task(5)]);
+    store.upsert_task(pinned_task(3, 50, 500));
+    let plan = Plan {
+        id: id(100),
+        created_at: at(0),
+        authority: PlanAuthority::Authoritative,
+        clearance: Tier::TopSecret,
+        entries: vec![
+            crate::ScheduleEntry {
+                item: id(1),
+                window: TimeWindow {
+                    start: at(200),
+                    end: at(300),
+                },
+                is_handle: false,
+            },
+            crate::ScheduleEntry {
+                item: id(2),
+                window: TimeWindow {
+                    start: at(100),
+                    end: at(250),
+                },
+                is_handle: false,
+            },
+            crate::ScheduleEntry {
+                item: id(3),
+                window: TimeWindow {
+                    start: at(50),
+                    end: at(500),
+                },
+                is_handle: false,
+            },
+            crate::ScheduleEntry {
+                item: id(4),
+                window: TimeWindow {
+                    start: at(25),
+                    end: at(150),
+                },
+                is_handle: false,
+            },
+            crate::ScheduleEntry {
+                item: id(5),
+                window: TimeWindow {
+                    start: at(10),
+                    end: at(400),
+                },
+                is_handle: true,
+            },
+        ],
+        objective_etas: BTreeMap::new(),
+        conflicts: Vec::new(),
+    };
+
+    assert_eq!(next_task(&store, &plan, at(150)), Some(id(2)));
+    let pinned_only = Plan {
+        entries: vec![plan.entries[2].clone()],
+        ..plan
+    };
+    assert_eq!(next_task(&store, &pinned_only, at(150)), None);
+}
+
+#[test]
+fn store_json_without_pinned_field_defaults_to_dynamic_task() {
+    let store = store_with_tasks(vec![pinned_task(1, 100, 200)]);
+    let mut value = serde_json::to_value(store).expect("store serializes");
+    for task in value["tasks"]
+        .as_object_mut()
+        .expect("tasks serialize as an object")
+        .values_mut()
+    {
+        task.as_object_mut()
+            .expect("task serializes as an object")
+            .remove("pinned");
+    }
+    let legacy_json = serde_json::to_string(&value).expect("JSON value serializes");
+    assert!(!legacy_json.contains("pinned"));
+
+    let loaded: Store = serde_json::from_str(&legacy_json).expect("legacy store deserializes");
+    assert_eq!(loaded.tasks[&id(1)].pinned, None);
+}
+
+#[test]
+fn re_plan_is_deterministic_with_pinned_tasks() {
+    let store = store_with_tasks(vec![
+        Task {
+            est_duration: chrono::Duration::hours(2),
+            ..task(1)
+        },
+        pinned_task(2, 3_600, 7_200),
+        blocked(3, &[2]),
+    ]);
+    let run = || {
+        re_plan(
+            &store,
+            ComputeTarget::DesktopOllama,
+            at(50),
+            at(0),
+            &[],
+            &AffectBudget { cap: 10 },
+            &DeterministicPlacer,
+        )
+        .expect("valid store")
+    };
+
+    let first = run();
+    let second = run();
+    assert_eq!(first.entries, second.entries);
+    assert_eq!(first.conflicts, second.conflicts);
+    assert_eq!(first.objective_etas, second.objective_etas);
 }
 
 /// Tasks `1..=n` labelled by rank band, plus indifference pairs drawn from one
