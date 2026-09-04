@@ -170,20 +170,24 @@ pub fn singleton_bundle_for(store: &mut Store, task_id: Id) -> Id {
 }
 
 pub fn dep_add(store: &mut Store, task_prefix: &str, blocker_prefix: &str) -> Result<(), String> {
-    let task_id = resolve_task_id(store, task_prefix)?;
-    let blocker_id = resolve_task_id(store, blocker_prefix)?;
-    reject_self_pair(task_id, blocker_id, "dependency")?;
+    let blocked = resolve_task_id(store, task_prefix)?;
+    let blocker = resolve_task_id(store, blocker_prefix)?;
+    dep_add_ids(store, blocked, blocker)
+}
+
+pub fn dep_add_ids(store: &mut Store, blocked: Id, blocker: Id) -> Result<(), String> {
+    reject_self_pair(blocked, blocker, "dependency")?;
 
     let task = store
         .tasks
-        .get(&task_id)
-        .expect("resolved task id must remain in the store");
-    if task.blocked_by.contains(&blocker_id) {
+        .get(&blocked)
+        .ok_or_else(|| format!("no task matches {blocked}"))?;
+    if task.blocked_by.contains(&blocker) {
         return Ok(());
     }
     let mut blocked_by = task.blocked_by.clone();
-    blocked_by.push(blocker_id);
-    commit_dependencies(store, task_id, blocked_by)
+    blocked_by.push(blocker);
+    commit_dependencies(store, blocked, blocked_by)
 }
 
 pub fn dep_rm(store: &mut Store, task_prefix: &str, blocker_prefix: &str) -> Result<(), String> {
@@ -240,7 +244,17 @@ pub fn dep_list(store: &Store, task_prefix: Option<String>) -> Result<Vec<Depend
 pub fn pref_add(store: &mut Store, a_prefix: &str, b_prefix: &str, eq: bool) -> Result<(), String> {
     let a = resolve_task_id(store, a_prefix)?;
     let b = resolve_task_id(store, b_prefix)?;
+    pref_add_ids(store, a, b, eq)
+}
+
+pub fn pref_add_ids(store: &mut Store, a: Id, b: Id, eq: bool) -> Result<(), String> {
     reject_self_pair(a, b, "preference")?;
+    if !store.tasks.contains_key(&a) {
+        return Err(format!("no task matches {a}"));
+    }
+    if !store.tasks.contains_key(&b) {
+        return Err(format!("no task matches {b}"));
+    }
 
     let mut proposed = store.clone();
     let left = singleton_bundle_for(&mut proposed, a);
