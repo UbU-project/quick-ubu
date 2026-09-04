@@ -227,6 +227,7 @@ pub fn re_plan(
     fixed_occupied.extend(
         pinned_candidates
             .iter()
+            .filter(|task_id| !store.tasks[task_id].transparent)
             .filter_map(|task_id| store.tasks[task_id].pinned.clone()),
     );
     let output = planner.place(&PlacementInput {
