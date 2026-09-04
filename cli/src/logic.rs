@@ -629,6 +629,204 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dep_add_adds_and_rejects_cycles_and_self_dependencies_atomically() {
+        let (a, b, _) = graph_ids();
+        let mut store = graph_store();
+
+        assert_eq!(dep_add(&mut store, &prefix(a), &prefix(b)), Ok(()));
+        assert_eq!(store.tasks[&a].blocked_by, vec![b]);
+
+        let after_add = store.clone();
+        assert_eq!(dep_add(&mut store, &prefix(a), &prefix(b)), Ok(()));
+        assert_eq!(store, after_add);
+
+        let cycle_error = dep_add(&mut store, &prefix(b), &prefix(a)).unwrap_err();
+        assert!(cycle_error.contains("dependency cycle"));
+        assert_eq!(store, after_add);
+
+        let self_error = dep_add(&mut store, &prefix(a), &prefix(a)).unwrap_err();
+        assert!(self_error.contains("self-dependency"));
+        assert_eq!(store, after_add);
+    }
+
+    #[test]
+    fn dep_rm_removes_and_dep_set_replaces_but_rejects_a_cycle_atomically() {
+        let (a, b, c) = graph_ids();
+        let mut store = graph_store();
+
+        dep_add(&mut store, &prefix(a), &prefix(b)).unwrap();
+        dep_rm(&mut store, &prefix(a), &prefix(b)).unwrap();
+        assert!(store.tasks[&a].blocked_by.is_empty());
+
+        dep_set(&mut store, &prefix(a), vec![prefix(b), prefix(c)]).unwrap();
+        assert_eq!(store.tasks[&a].blocked_by, vec![b, c]);
+
+        dep_set(&mut store, &prefix(a), vec![prefix(c)]).unwrap();
+        dep_set(&mut store, &prefix(b), vec![prefix(a)]).unwrap();
+        let before_cycle = store.clone();
+        let error = dep_set(&mut store, &prefix(a), vec![prefix(b)]).unwrap_err();
+        assert!(error.contains("dependency cycle"));
+        assert_eq!(store, before_cycle);
+    }
+
+    #[test]
+    fn dep_list_reports_one_task_or_all_tasks_with_dependencies() {
+        let (a, b, c) = graph_ids();
+        let mut store = graph_store();
+        dep_add(&mut store, &prefix(a), &prefix(b)).unwrap();
+
+        assert_eq!(
+            dep_list(&store, None),
+            Ok(vec![(prefix(a), "Alpha".to_string(), vec![prefix(b)],)])
+        );
+        assert_eq!(
+            dep_list(&store, Some(prefix(c))),
+            Ok(vec![(prefix(c), "Charlie".to_string(), Vec::new())])
+        );
+    }
+
+    #[test]
+    fn pref_add_creates_and_reuses_singletons_and_rejects_contradictions_atomically() {
+        let (a, b, c) = graph_ids();
+        let mut store = graph_store();
+
+        pref_add(&mut store, &prefix(a), &prefix(b), false).unwrap();
+        assert_eq!(store.bundles.len(), 2);
+        assert_eq!(store.preferences.len(), 1);
+        assert_eq!(store.preferences[0].relation, Relation::Strict);
+        let a_bundle = store.preferences[0].left;
+
+        pref_add(&mut store, &prefix(a), &prefix(c), true).unwrap();
+        assert_eq!(store.bundles.len(), 3);
+        assert_eq!(store.preferences.len(), 2);
+        assert_eq!(store.preferences[1].relation, Relation::Indifferent);
+        assert_eq!(store.preferences[1].left, a_bundle);
+
+        let before_contradiction = store.clone();
+        let error = pref_add(&mut store, &prefix(b), &prefix(a), false).unwrap_err();
+        assert!(error.contains("preference cycle"));
+        assert!(error.contains(&a.to_string()));
+        assert!(error.contains(&b.to_string()));
+        assert_eq!(store, before_contradiction);
+    }
+
+    #[test]
+    fn pref_rm_removes_a_relation_regardless_of_direction() {
+        let (a, b, _) = graph_ids();
+        let mut store = graph_store();
+        pref_add(&mut store, &prefix(a), &prefix(b), false).unwrap();
+
+        pref_rm(&mut store, &prefix(b), &prefix(a)).unwrap();
+
+        assert!(store.preferences.is_empty());
+        assert_eq!(store.bundles.len(), 2);
+    }
+
+    #[test]
+    fn pref_list_shows_preferences_and_resolved_high_to_low_ranking() {
+        let (a, b, c) = graph_ids();
+        let mut store = graph_store();
+        pref_add(&mut store, &prefix(a), &prefix(b), false).unwrap();
+        pref_add(&mut store, &prefix(b), &prefix(c), true).unwrap();
+
+        let lines = pref_list(&store);
+
+        assert_eq!(
+            lines[0],
+            format!("{} Alpha ≻ {} Bravo", prefix(a), prefix(b))
+        );
+        assert_eq!(
+            lines[1],
+            format!("{} Bravo ~ {} Charlie", prefix(b), prefix(c))
+        );
+        assert_eq!(lines[2], "ranking (high→low):");
+        assert_eq!(lines[3], format!("1: {} Alpha", prefix(a)));
+        assert_eq!(
+            lines[4],
+            format!("2: {} Bravo ~ {} Charlie", prefix(b), prefix(c))
+        );
+    }
+
+    #[test]
+    fn dependency_and_preference_commands_reject_unknown_and_ambiguous_prefixes() {
+        let (a, b, _) = graph_ids();
+        let ambiguous = Uuid::parse_str("aaaabbbb-0000-0000-0000-000000000004").unwrap();
+        let mut store = graph_store();
+        store.upsert_task(graph_task(ambiguous, "Ambiguous Alpha"));
+        let original = store.clone();
+
+        assert_eq!(
+            dep_add(&mut store, "missing", &prefix(b)),
+            Err("no task matches missing".to_string())
+        );
+        assert_eq!(
+            dep_rm(&mut store, &prefix(a), "missing"),
+            Err("no task matches missing".to_string())
+        );
+        assert_eq!(
+            dep_set(&mut store, &prefix(b), vec!["aaaa".to_string()]),
+            Err("ambiguous prefix aaaa".to_string())
+        );
+        assert_eq!(
+            dep_list(&store, Some("aaaa".to_string())),
+            Err("ambiguous prefix aaaa".to_string())
+        );
+        assert_eq!(
+            pref_add(&mut store, "aaaa", &prefix(b), false),
+            Err("ambiguous prefix aaaa".to_string())
+        );
+        assert_eq!(
+            pref_rm(&mut store, &prefix(b), "missing"),
+            Err("no task matches missing".to_string())
+        );
+        assert_eq!(store, original);
+    }
+
+    fn graph_ids() -> (Id, Id, Id) {
+        (
+            Uuid::parse_str("aaaaaaaa-0000-0000-0000-000000000001").unwrap(),
+            Uuid::parse_str("bbbbbbbb-0000-0000-0000-000000000002").unwrap(),
+            Uuid::parse_str("cccccccc-0000-0000-0000-000000000003").unwrap(),
+        )
+    }
+
+    fn graph_store() -> Store {
+        let (a, b, c) = graph_ids();
+        let mut store = Store::new();
+        store.upsert_task(graph_task(a, "Alpha"));
+        store.upsert_task(graph_task(b, "Bravo"));
+        store.upsert_task(graph_task(c, "Charlie"));
+        store
+    }
+
+    fn graph_task(id: Id, title: &str) -> Task {
+        Task {
+            id,
+            tier: Tier::UserShared,
+            title: title.to_string(),
+            detail: None,
+            objective_ids: Vec::new(),
+            skills: Vec::new(),
+            affect_cost: 0,
+            est_duration: Duration::minutes(30),
+            due: None,
+            earliest_start: None,
+            category: None,
+            pinned: None,
+            transparent: false,
+            blocked_by: Vec::new(),
+            defer_policy: DeferPolicy::RescheduleAsap,
+            status: TaskStatus::Backlog,
+            provenance: Provenance::Manual,
+            commitment: None,
+        }
+    }
+
+    fn prefix(id: Id) -> String {
+        id.simple().to_string()[..8].to_string()
+    }
+
     fn fixed_time() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, 1, 14, 0, 0).single().unwrap()
     }
