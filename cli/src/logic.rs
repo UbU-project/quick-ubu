@@ -1,7 +1,10 @@
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Duration, Utc};
 use ubu_core::{
-    next_task, re_plan, AffectBudget, ComputeTarget, CoreError, DeferPolicy, DeterministicPlacer,
-    Id, Objective, ObjectiveStatus, Planner, Provenance, Store, Task, TaskStatus, Tier, TimeWindow,
+    next_task, re_plan, resolve_preferences, topo_order, AffectBudget, Bundle, ComputeTarget,
+    CoreError, DeferPolicy, DeterministicPlacer, Id, Objective, ObjectiveStatus, Planner,
+    Preference, Provenance, Relation, Store, Task, TaskStatus, Tier, TimeWindow,
 };
 use uuid::Uuid;
 
@@ -61,6 +64,8 @@ pub struct ConflictRow {
     pub title: String,
     pub reason: String,
 }
+
+pub type DependencyRow = (String, String, Vec<String>);
 
 pub fn parse_tier(value: &str) -> Result<Tier, String> {
     match value {
@@ -145,6 +150,249 @@ pub fn done(store: &mut Store, prefix: &str) -> Result<(), String> {
 
 pub fn defer(store: &mut Store, prefix: &str) -> Result<(), String> {
     set_status(store, prefix, TaskStatus::Deferred)
+}
+
+pub fn singleton_bundle_for(store: &mut Store, task_id: Id) -> Id {
+    if let Some(bundle) = store
+        .bundles
+        .values()
+        .find(|bundle| bundle.members.len() == 1 && bundle.members.contains(&task_id))
+    {
+        return bundle.id;
+    }
+
+    let id = Uuid::new_v4();
+    store.upsert_bundle(Bundle {
+        id,
+        members: BTreeSet::from([task_id]),
+    });
+    id
+}
+
+pub fn dep_add(store: &mut Store, task_prefix: &str, blocker_prefix: &str) -> Result<(), String> {
+    let task_id = resolve_task_id(store, task_prefix)?;
+    let blocker_id = resolve_task_id(store, blocker_prefix)?;
+    reject_self_pair(task_id, blocker_id, "dependency")?;
+
+    let task = store
+        .tasks
+        .get(&task_id)
+        .expect("resolved task id must remain in the store");
+    if task.blocked_by.contains(&blocker_id) {
+        return Ok(());
+    }
+    let mut blocked_by = task.blocked_by.clone();
+    blocked_by.push(blocker_id);
+    commit_dependencies(store, task_id, blocked_by)
+}
+
+pub fn dep_rm(store: &mut Store, task_prefix: &str, blocker_prefix: &str) -> Result<(), String> {
+    let task_id = resolve_task_id(store, task_prefix)?;
+    let blocker_id = resolve_task_id(store, blocker_prefix)?;
+    let task = store
+        .tasks
+        .get_mut(&task_id)
+        .expect("resolved task id must remain in the store");
+    task.blocked_by.retain(|id| *id != blocker_id);
+    Ok(())
+}
+
+pub fn dep_set(
+    store: &mut Store,
+    task_prefix: &str,
+    blocker_prefixes: Vec<String>,
+) -> Result<(), String> {
+    let task_id = resolve_task_id(store, task_prefix)?;
+    let blocked_by = blocker_prefixes
+        .iter()
+        .map(|prefix| resolve_task_id(store, prefix))
+        .collect::<Result<Vec<_>, _>>()?;
+    if blocked_by.contains(&task_id) {
+        return Err(format!("task {task_id} cannot depend on itself"));
+    }
+    commit_dependencies(store, task_id, blocked_by)
+}
+
+pub fn dep_list(store: &Store, task_prefix: Option<String>) -> Result<Vec<DependencyRow>, String> {
+    let tasks = match task_prefix {
+        Some(prefix) => vec![resolve_task_id(store, &prefix)?],
+        None => store
+            .tasks
+            .values()
+            .filter(|task| !task.blocked_by.is_empty())
+            .map(|task| task.id)
+            .collect(),
+    };
+
+    Ok(tasks
+        .into_iter()
+        .map(|task_id| {
+            let task = &store.tasks[&task_id];
+            (
+                short_task_id(task_id),
+                task.title.clone(),
+                task.blocked_by.iter().copied().map(short_task_id).collect(),
+            )
+        })
+        .collect())
+}
+
+pub fn pref_add(store: &mut Store, a_prefix: &str, b_prefix: &str, eq: bool) -> Result<(), String> {
+    let a = resolve_task_id(store, a_prefix)?;
+    let b = resolve_task_id(store, b_prefix)?;
+    reject_self_pair(a, b, "preference")?;
+
+    let mut proposed = store.clone();
+    let left = singleton_bundle_for(&mut proposed, a);
+    let right = singleton_bundle_for(&mut proposed, b);
+    proposed.add_preference(Preference {
+        left,
+        right,
+        relation: if eq {
+            Relation::Indifferent
+        } else {
+            Relation::Strict
+        },
+    });
+    validate_preferences(&proposed)?;
+    *store = proposed;
+    Ok(())
+}
+
+pub fn pref_rm(store: &mut Store, a_prefix: &str, b_prefix: &str) -> Result<(), String> {
+    let a = resolve_task_id(store, a_prefix)?;
+    let b = resolve_task_id(store, b_prefix)?;
+    let Some(left) = existing_singleton_bundle(store, a) else {
+        return Ok(());
+    };
+    let Some(right) = existing_singleton_bundle(store, b) else {
+        return Ok(());
+    };
+
+    store.preferences.retain(|preference| {
+        !((preference.left == left && preference.right == right)
+            || (preference.left == right && preference.right == left))
+    });
+    Ok(())
+}
+
+pub fn pref_list(store: &Store) -> Vec<String> {
+    let mut lines = store
+        .preferences()
+        .iter()
+        .map(|preference| {
+            let relation = match preference.relation {
+                Relation::Strict => "≻",
+                Relation::Indifferent => "~",
+            };
+            format!(
+                "{} {relation} {}",
+                bundle_label(store, preference.left),
+                bundle_label(store, preference.right)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    match resolve_preferences(store) {
+        Ok(classes) => {
+            lines.push("ranking (high→low):".to_string());
+            lines.extend(classes.into_iter().enumerate().map(|(index, class)| {
+                format!(
+                    "{}: {}",
+                    index + 1,
+                    class
+                        .into_iter()
+                        .map(|task_id| task_label(store, task_id))
+                        .collect::<Vec<_>>()
+                        .join(" ~ ")
+                )
+            }));
+        }
+        Err(error) => lines.push(format!("ranking error: {error:?}")),
+    }
+    lines
+}
+
+fn commit_dependencies(store: &mut Store, task_id: Id, blocked_by: Vec<Id>) -> Result<(), String> {
+    let mut proposed = store.clone();
+    proposed
+        .tasks
+        .get_mut(&task_id)
+        .expect("resolved task id must remain in the store")
+        .blocked_by = blocked_by.clone();
+    validate_dependencies(&proposed)?;
+    store
+        .tasks
+        .get_mut(&task_id)
+        .expect("resolved task id must remain in the store")
+        .blocked_by = blocked_by;
+    Ok(())
+}
+
+fn validate_dependencies(store: &Store) -> Result<(), String> {
+    match topo_order(store) {
+        Ok(_) => Ok(()),
+        Err(CoreError::DependencyCycle { involved }) => Err(format!(
+            "dependency cycle involving tasks: {}",
+            display_ids(&involved)
+        )),
+        Err(error) => Err(format!("dependency validation failed: {error:?}")),
+    }
+}
+
+fn validate_preferences(store: &Store) -> Result<(), String> {
+    match resolve_preferences(store) {
+        Ok(_) => Ok(()),
+        Err(CoreError::PreferenceCycle { involved }) => Err(format!(
+            "preference cycle involving tasks: {}",
+            display_ids(&involved)
+        )),
+        Err(error) => Err(format!("preference validation failed: {error:?}")),
+    }
+}
+
+fn reject_self_pair(left: Id, right: Id, kind: &str) -> Result<(), String> {
+    if left == right {
+        Err(format!("task {left} cannot have a self-{kind}"))
+    } else {
+        Ok(())
+    }
+}
+
+fn existing_singleton_bundle(store: &Store, task_id: Id) -> Option<Id> {
+    store
+        .bundles
+        .values()
+        .find(|bundle| bundle.members.len() == 1 && bundle.members.contains(&task_id))
+        .map(|bundle| bundle.id)
+}
+
+fn bundle_label(store: &Store, bundle_id: Id) -> String {
+    store
+        .bundles
+        .get(&bundle_id)
+        .and_then(|bundle| {
+            (bundle.members.len() == 1)
+                .then(|| bundle.members.iter().next().copied())
+                .flatten()
+        })
+        .map(|task_id| task_label(store, task_id))
+        .unwrap_or_else(|| format!("bundle {}", short_task_id(bundle_id)))
+}
+
+fn task_label(store: &Store, task_id: Id) -> String {
+    format!("{} {}", short_task_id(task_id), task_title(store, task_id))
+}
+
+fn short_task_id(id: Id) -> String {
+    id.simple().to_string()[..8].to_string()
+}
+
+fn display_ids(ids: &[Id]) -> String {
+    ids.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn objective_add(store: &mut Store, input: ObjectiveAddInput) -> Id {
