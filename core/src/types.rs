@@ -192,6 +192,10 @@ pub enum CommandKind {
         task_id: Id,
         due: Option<chrono::DateTime<chrono::Utc>>,
     },
+    EditDuration {
+        task_id: Id,
+        est_duration: chrono::Duration,
+    },
     EditPin {
         task_id: Id,
         pinned: Option<TimeWindow>,
