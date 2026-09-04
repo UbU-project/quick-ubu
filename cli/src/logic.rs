@@ -3,8 +3,9 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Duration, Utc};
 use ubu_core::{
     next_task, re_plan, resolve_preferences, topo_order, AffectBudget, Bundle, ComputeTarget,
-    CoreError, DeferPolicy, DeterministicPlacer, Id, Objective, ObjectiveStatus, Planner,
-    Preference, Provenance, Relation, Store, Task, TaskStatus, Tier, TimeWindow,
+    CoreError, DecisionSource, DeferPolicy, DeterministicPlacer, Id, Objective, ObjectiveStatus,
+    PendingDecision, Planner, Preference, Proposal, Provenance, Relation, Store, Task, TaskStatus,
+    Tier, TimeWindow,
 };
 use uuid::Uuid;
 
@@ -327,6 +328,58 @@ pub fn pref_list(store: &Store) -> Vec<String> {
     lines
 }
 
+pub fn enqueue_incomparable_pairs(store: &mut Store) -> usize {
+    let task_ids = store
+        .tasks
+        .values()
+        .filter(|task| {
+            matches!(task.status, TaskStatus::Backlog | TaskStatus::Scheduled)
+                && task.pinned.is_none()
+        })
+        .map(|task| task.id)
+        .collect::<Vec<_>>();
+    let mut added = 0;
+
+    for (index, a) in task_ids.iter().copied().enumerate() {
+        for b in task_ids.iter().copied().skip(index + 1) {
+            let pair = ordered_pair(a, b);
+            let related = store.preferences.iter().any(|preference| {
+                let Some(left) = singleton_task_for_bundle(store, preference.left) else {
+                    return false;
+                };
+                let Some(right) = singleton_task_for_bundle(store, preference.right) else {
+                    return false;
+                };
+                ordered_pair(left, right) == pair
+            });
+            let decided = store
+                .decision_history
+                .iter()
+                .any(|record| preference_pair(&record.proposal) == Some(pair));
+            let pending = store
+                .pending_decisions
+                .iter()
+                .any(|decision| preference_pair(&decision.proposal) == Some(pair));
+            if related || decided || pending {
+                continue;
+            }
+
+            store.pending_decisions.push(PendingDecision {
+                id: Uuid::new_v4(),
+                source: DecisionSource::Elicitation,
+                proposal: Proposal::Preference {
+                    a,
+                    b,
+                    suggested: None,
+                },
+            });
+            added += 1;
+        }
+    }
+
+    added
+}
+
 fn commit_dependencies(store: &mut Store, task_id: Id, blocked_by: Vec<Id>) -> Result<(), String> {
     let mut proposed = store.clone();
     proposed
@@ -379,6 +432,28 @@ fn existing_singleton_bundle(store: &Store, task_id: Id) -> Option<Id> {
         .values()
         .find(|bundle| bundle.members.len() == 1 && bundle.members.contains(&task_id))
         .map(|bundle| bundle.id)
+}
+
+fn singleton_task_for_bundle(store: &Store, bundle_id: Id) -> Option<Id> {
+    let bundle = store.bundles.get(&bundle_id)?;
+    (bundle.members.len() == 1)
+        .then(|| bundle.members.iter().next().copied())
+        .flatten()
+}
+
+fn preference_pair(proposal: &Proposal) -> Option<(Id, Id)> {
+    match proposal {
+        Proposal::Preference { a, b, .. } => Some(ordered_pair(*a, *b)),
+        Proposal::Dependency { .. } => None,
+    }
+}
+
+fn ordered_pair(a: Id, b: Id) -> (Id, Id) {
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 fn bundle_label(store: &Store, bundle_id: Id) -> String {
