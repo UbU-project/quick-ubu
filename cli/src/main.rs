@@ -61,6 +61,8 @@ struct AddArgs {
     #[arg(long)]
     category: Option<String>,
     #[arg(long)]
+    transparent: bool,
+    #[arg(long)]
     objective: Vec<String>,
     #[arg(long)]
     blocked_by: Vec<String>,
@@ -168,6 +170,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     earliest_start: parse_optional_datetime(args.earliest_start)?,
                     pin: parse_optional_datetime(args.pin)?,
                     category: args.category,
+                    transparent: args.transparent,
                     objective_prefixes: args.objective,
                     blocked_by_prefixes: args.blocked_by,
                 },
@@ -265,10 +268,11 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::RoutineList => {
             for routine in store.routines().values() {
                 println!(
-                    "{}  {}  {}  {}  {}  {}s  {}",
+                    "{}  {}  {}  {}  {}  {}  {}s  {}",
                     short_id(routine.id),
                     routine.title,
                     routine.category.as_deref().unwrap_or(""),
+                    transparency_marker(routine.transparent),
                     tier_name(routine.tier),
                     routine.start_time,
                     routine.duration.num_seconds(),
@@ -373,11 +377,12 @@ fn print_replan(output: logic::ReplanOutput) {
     println!("Schedule:");
     for entry in output.schedule {
         println!(
-            "{}–{}  {}  {} ({})",
+            "{}–{}  {}  {}  {} ({})",
             entry.window.start.format("%H:%M"),
             entry.window.end.format("%H:%M"),
             entry.title,
             entry.category.as_deref().unwrap_or(""),
+            transparency_marker(entry.transparent),
             short_id(entry.id)
         );
     }
@@ -455,5 +460,13 @@ fn task_status_name(status: &TaskStatus) -> &'static str {
         TaskStatus::Active => "active",
         TaskStatus::Done => "done",
         TaskStatus::Deferred => "deferred",
+    }
+}
+
+fn transparency_marker(transparent: bool) -> &'static str {
+    if transparent {
+        "transparent"
+    } else {
+        ""
     }
 }

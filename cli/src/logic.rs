@@ -16,6 +16,7 @@ pub struct AddInput {
     pub earliest_start: Option<DateTime<Utc>>,
     pub pin: Option<DateTime<Utc>>,
     pub category: Option<String>,
+    pub transparent: bool,
     pub objective_prefixes: Vec<String>,
     pub blocked_by_prefixes: Vec<String>,
 }
@@ -46,6 +47,7 @@ pub struct ScheduleRow {
     pub id: Id,
     pub title: String,
     pub category: Option<String>,
+    pub transparent: bool,
     pub window: TimeWindow,
 }
 
@@ -111,7 +113,7 @@ pub fn add(store: &mut Store, input: AddInput) -> Result<Id, String> {
         earliest_start: input.earliest_start,
         category: input.category,
         pinned,
-        transparent: false,
+        transparent: input.transparent,
         blocked_by,
         defer_policy: DeferPolicy::RescheduleAsap,
         status,
@@ -191,6 +193,7 @@ pub fn replan_with_planner(
             id: entry.item,
             title: task_title(store, entry.item),
             category: task_category(store, entry.item),
+            transparent: task_transparent(store, entry.item),
             window: entry.window,
         })
         .collect::<Vec<_>>();
@@ -249,6 +252,7 @@ pub fn next(
                 id: task_id,
                 title: task_title(store, task_id),
                 category: task_category(store, task_id),
+                transparent: task_transparent(store, task_id),
                 window: entry.window.clone(),
             })
     }))
@@ -273,10 +277,11 @@ fn task_title(store: &Store, id: Id) -> String {
 }
 
 fn task_category(store: &Store, id: Id) -> Option<String> {
-    store
-        .tasks
-        .get(&id)
-        .and_then(|task| task.category.clone())
+    store.tasks.get(&id).and_then(|task| task.category.clone())
+}
+
+fn task_transparent(store: &Store, id: Id) -> bool {
+    store.tasks.get(&id).is_some_and(|task| task.transparent)
 }
 
 #[cfg(test)]
@@ -318,6 +323,7 @@ mod tests {
                 earliest_start: None,
                 pin: None,
                 category: None,
+                transparent: false,
                 objective_prefixes: vec![objective_id.simple().to_string()[..8].to_string()],
                 blocked_by_prefixes: Vec::new(),
             },
@@ -356,6 +362,7 @@ mod tests {
                 earliest_start: None,
                 pin: None,
                 category: None,
+                transparent: false,
                 objective_prefixes: Vec::new(),
                 blocked_by_prefixes: Vec::new(),
             },
