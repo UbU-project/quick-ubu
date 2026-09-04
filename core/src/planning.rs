@@ -400,6 +400,7 @@ mod tests {
             earliest_start: None,
             category: None,
             pinned: None,
+            transparent: false,
             blocked_by,
             defer_policy: DeferPolicy::ReturnToBacklog,
             status,

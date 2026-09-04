@@ -111,6 +111,7 @@ pub fn add(store: &mut Store, input: AddInput) -> Result<Id, String> {
         earliest_start: input.earliest_start,
         category: input.category,
         pinned,
+        transparent: false,
         blocked_by,
         defer_policy: DeferPolicy::RescheduleAsap,
         status,

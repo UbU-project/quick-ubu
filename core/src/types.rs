@@ -108,6 +108,11 @@ pub struct Task {
     /// NOT placed by the planner. `None` = a dynamic task the planner schedules.
     #[serde(default)]
     pub pinned: Option<TimeWindow>,
+    /// If true, this commitment is shown/scheduled but does NOT occupy time —
+    /// dynamic tasks may be placed within its window (a Google "transparent"
+    /// event). Default false = opaque/blocking.
+    #[serde(default)]
+    pub transparent: bool,
     /// precedence edges (dynamic)
     pub blocked_by: Vec<Id>,
     pub defer_policy: DeferPolicy,

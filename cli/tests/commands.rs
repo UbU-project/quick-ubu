@@ -162,6 +162,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             duration: Duration::minutes(45),
             affect_cost: 2,
             category: Some("personal".to_string()),
+            transparent: false,
             recurrence: Recurrence::Daily,
         },
         RoutineTemplate {
@@ -172,6 +173,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             duration: Duration::minutes(15),
             affect_cost: 1,
             category: None,
+            transparent: false,
             recurrence: Recurrence::MonthlyDay {
                 days: [1, 15].into_iter().collect(),
             },

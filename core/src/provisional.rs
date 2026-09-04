@@ -81,6 +81,7 @@ mod tests {
             earliest_start: None,
             category: None,
             pinned: None,
+            transparent: false,
             blocked_by: Vec::new(),
             defer_policy: DeferPolicy::ReturnToBacklog,
             status: TaskStatus::Backlog,

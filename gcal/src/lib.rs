@@ -392,6 +392,7 @@ pub fn import_from_calendar(
             earliest_start: None,
             category: if is_commitment { category } else { None },
             pinned: is_commitment.then_some(window),
+            transparent: false,
             blocked_by: Vec::new(),
             defer_policy: DeferPolicy::RescheduleAsap,
             status: if is_commitment {
@@ -582,6 +583,7 @@ mod stub_tests {
                 start: at(value as i64),
                 end: at(value as i64 + 30),
             }),
+            transparent: false,
             blocked_by: Vec::new(),
             defer_policy: DeferPolicy::RescheduleAsap,
             status: TaskStatus::Scheduled,

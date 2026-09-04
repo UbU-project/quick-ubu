@@ -58,6 +58,11 @@ pub struct RoutineTemplate {
     /// Maps to a calendar color on export and groups time in reporting.
     #[serde(default)]
     pub category: Option<String>,
+    /// If true, this commitment is shown/scheduled but does NOT occupy time —
+    /// dynamic tasks may be placed within its window (a Google "transparent"
+    /// event). Default false = opaque/blocking.
+    #[serde(default)]
+    pub transparent: bool,
     pub recurrence: Recurrence,
 }
 
@@ -115,6 +120,7 @@ pub fn expand_routine(
                 earliest_start: None,
                 category: template.category.clone(),
                 pinned: Some(TimeWindow { start, end }),
+                transparent: template.transparent,
                 blocked_by: Vec::new(),
                 defer_policy: DeferPolicy::RescheduleAsap,
                 status: TaskStatus::Scheduled,
@@ -187,6 +193,7 @@ mod tests {
             duration: Duration::minutes(45),
             affect_cost: 3,
             category: None,
+            transparent: false,
             recurrence,
         }
     }
@@ -555,6 +562,7 @@ mod tests {
         let replacement = RoutineTemplate {
             title: "replacement".to_string(),
             category: None,
+            transparent: false,
             ..first.clone()
         };
         assert_eq!(
