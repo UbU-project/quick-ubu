@@ -1,6 +1,7 @@
 //! `quick-ubu` core: v1 data types, the in-memory `Store`, and the deterministic
 //! precompute functions. No I/O, no networking.
 
+pub mod decision;
 pub mod plan;
 pub mod planning;
 pub mod precompute;
@@ -11,6 +12,7 @@ pub mod routine;
 pub mod store;
 pub mod types;
 
+pub use decision::*;
 pub use plan::*;
 pub use planning::*;
 pub use precompute::*;

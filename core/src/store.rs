@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::decision::{DecisionRecord, PendingDecision};
 use crate::routine::RoutineTemplate;
 use crate::types::{Bundle, CoreError, Id, LogEntry, Objective, Preference, Task};
 
@@ -16,6 +17,10 @@ pub struct Store {
     pub routines: BTreeMap<Id, RoutineTemplate>,
     pub bundles: BTreeMap<Id, Bundle>,
     pub preferences: Vec<Preference>,
+    #[serde(default)]
+    pub pending_decisions: Vec<PendingDecision>,
+    #[serde(default)]
+    pub decision_history: Vec<DecisionRecord>,
     /// task id -> Google Calendar event id, for idempotent create-or-update.
     #[serde(default)]
     pub calendar_links: BTreeMap<Id, String>,
