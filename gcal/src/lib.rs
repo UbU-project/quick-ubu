@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ubu_core::{
-    log_actual, log_capture, log_edit_pin, reconcile, visible_as_content, ActualStatus,
-    DeferPolicy, Id, Plan, Provenance, Store, Task, TaskStatus, Tier, TimeWindow,
+    log_actual, log_capture, log_edit_duration, log_edit_pin, reconcile, visible_as_content,
+    ActualStatus, DeferPolicy, Id, Plan, Provenance, Store, Task, TaskStatus, Tier, TimeWindow,
 };
 use yup_oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};
 
@@ -341,6 +341,7 @@ pub struct ImportReport {
     pub captured: usize,
     pub completed: usize,
     pub moved: usize,
+    pub resized: usize,
 }
 
 pub fn import_from_calendar(
@@ -361,6 +362,7 @@ pub fn import_from_calendar(
         captured: 0,
         completed: 0,
         moved: 0,
+        resized: 0,
     };
 
     for event in events {
@@ -376,6 +378,12 @@ pub fn import_from_calendar(
                 if event.color_id.is_some() && task.status != TaskStatus::Done {
                     entries.push(log_actual(task_id, ActualStatus::Done, Some(window), now));
                     report.completed += 1;
+                } else {
+                    let new_dur = window.end - window.start;
+                    if new_dur > chrono::Duration::zero() && new_dur != task.est_duration {
+                        entries.push(log_edit_duration(task_id, new_dur, now));
+                        report.resized += 1;
+                    }
                 }
             } else if task.pinned.as_ref() != Some(&window) {
                 entries.push(log_edit_pin(task_id, Some(window), now));
