@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -58,6 +59,8 @@ enum Command {
         b: String,
     },
     PrefList,
+    Review,
+    Prioritize,
     ObjectiveAdd(ObjectiveAddArgs),
     Replan(ReplanArgs),
     Next(NextArgs),
@@ -260,6 +263,16 @@ fn run(cli: Cli) -> Result<(), String> {
                 println!("{line}");
             }
         }
+        Command::Review => {
+            review_decisions(&mut store)?;
+            persist::save(&cli.store, &store)?;
+        }
+        Command::Prioritize => {
+            let added = logic::enqueue_incomparable_pairs(&mut store);
+            println!("enqueued {added}");
+            review_decisions(&mut store)?;
+            persist::save(&cli.store, &store)?;
+        }
         Command::ObjectiveAdd(args) => {
             let id = logic::objective_add(
                 &mut store,
@@ -413,6 +426,106 @@ fn run(cli: Cli) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn review_decisions(store: &mut ubu_core::Store) -> Result<(), String> {
+    let decision_ids = store
+        .pending_decisions
+        .iter()
+        .map(|decision| decision.id)
+        .collect::<Vec<_>>();
+    let stdin = io::stdin();
+
+    for decision_id in decision_ids {
+        let Some(decision) = store
+            .pending_decisions
+            .iter()
+            .find(|decision| decision.id == decision_id)
+            .cloned()
+        else {
+            continue;
+        };
+        print_decision(store, &decision);
+
+        loop {
+            let prompt = match &decision.proposal {
+                ubu_core::Proposal::Preference { .. } => {
+                    "[a] A ≻ B, [b] B ≻ A, [e] indifferent, [s] skip, [q] quit: "
+                }
+                ubu_core::Proposal::Dependency { .. } => "[c] confirm, [r] reject, [q] quit: ",
+            };
+            print!("{prompt}");
+            io::stdout()
+                .flush()
+                .map_err(|error| format!("failed to flush review prompt: {error}"))?;
+            let mut input = String::new();
+            let bytes_read = stdin
+                .read_line(&mut input)
+                .map_err(|error| format!("failed to read review answer: {error}"))?;
+            if bytes_read == 0 {
+                return Ok(());
+            }
+            let answer = input.trim().to_ascii_lowercase();
+            if answer == "q" {
+                return Ok(());
+            }
+            let parsed = match (&decision.proposal, answer.as_str()) {
+                (ubu_core::Proposal::Preference { .. }, "a") => Some(logic::Answer::AStrictB),
+                (ubu_core::Proposal::Preference { .. }, "b") => Some(logic::Answer::BStrictA),
+                (ubu_core::Proposal::Preference { .. }, "e") => Some(logic::Answer::Indifferent),
+                (ubu_core::Proposal::Preference { .. }, "s") => Some(logic::Answer::Skip),
+                (ubu_core::Proposal::Dependency { .. }, "c") => Some(logic::Answer::Confirm),
+                (ubu_core::Proposal::Dependency { .. }, "r") => Some(logic::Answer::Reject),
+                _ => None,
+            };
+            let Some(answer) = parsed else {
+                println!("invalid answer");
+                continue;
+            };
+
+            match logic::resolve_decision(store, decision_id, answer) {
+                Ok(resolution) => println!("{resolution:?}"),
+                Err(error) => println!("error: {error}"),
+            }
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn print_decision(store: &ubu_core::Store, decision: &ubu_core::PendingDecision) {
+    match &decision.proposal {
+        ubu_core::Proposal::Preference { a, b, suggested } => {
+            println!(
+                "Preference: {} vs {}",
+                decision_task_label(store, *a),
+                decision_task_label(store, *b)
+            );
+            if let Some(suggested) = suggested {
+                let suggestion = match suggested {
+                    ubu_core::PrefSuggestion::AStrictB => "A ≻ B",
+                    ubu_core::PrefSuggestion::BStrictA => "B ≻ A",
+                    ubu_core::PrefSuggestion::Indifferent => "indifferent",
+                };
+                println!("Suggestion: {suggestion}");
+            }
+        }
+        ubu_core::Proposal::Dependency { blocked, blocker } => println!(
+            "Dependency: {} blocked by {}",
+            decision_task_label(store, *blocked),
+            decision_task_label(store, *blocker)
+        ),
+    }
+}
+
+fn decision_task_label(store: &ubu_core::Store, task_id: ubu_core::Id) -> String {
+    let title = store
+        .tasks
+        .get(&task_id)
+        .map(|task| task.title.as_str())
+        .unwrap_or("<unknown>");
+    format!("{title} ({})", short_id(task_id))
 }
 
 fn parse_optional_datetime(value: Option<String>) -> Result<Option<DateTime<Utc>>, String> {
