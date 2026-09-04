@@ -522,7 +522,8 @@ mod stub_tests {
     use super::*;
     use chrono::Duration;
     use ubu_core::{
-        DeferPolicy, Id, PlanAuthority, Provenance, ScheduleEntry, Task, TaskStatus, TimeWindow,
+        re_plan, AffectBudget, ComputeTarget, DeferPolicy, DeterministicPlacer, Id, PlanAuthority,
+        Provenance, ScheduleEntry, Task, TaskStatus, TimeWindow,
     };
 
     fn event() -> CalendarEvent {
@@ -927,6 +928,7 @@ mod stub_tests {
                 captured: 1,
                 completed: 0,
                 moved: 0,
+                resized: 0,
             }
         );
         let task_id = linked_task_id(&store, &event.id);
@@ -991,6 +993,135 @@ mod stub_tests {
     }
 
     #[test]
+    fn resized_owned_dynamic_event_updates_duration_and_replanning_uses_it() {
+        let mut store = Store::new();
+        let mut dynamic = task(1, "Dynamic", Tier::UserShared, false, None);
+        dynamic.status = TaskStatus::Backlog;
+        let task_id = dynamic.id;
+        store.upsert_task(dynamic);
+        store.upsert_calendar_link(task_id, "owned-dynamic".to_string());
+        let event = fetched_event("owned-dynamic", "Dynamic", None, 60, 150);
+
+        let report = import_from_calendar(
+            &mut store,
+            &[event],
+            at(0),
+            Tier::UserShared,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(report.resized, 1);
+        assert_eq!(store.tasks[&task_id].est_duration, Duration::minutes(90));
+        assert!(matches!(
+            &store.log[0].kind,
+            ubu_core::LogEntryKind::Command(ubu_core::CommandKind::EditDuration {
+                task_id: logged_id,
+                est_duration,
+            }) if *logged_id == task_id && *est_duration == Duration::minutes(90)
+        ));
+
+        let plan = re_plan(
+            &store,
+            ComputeTarget::DesktopOllama,
+            at(0),
+            at(0),
+            &[],
+            &AffectBudget { cap: 10 },
+            &DeterministicPlacer,
+        )
+        .unwrap();
+        let planned = plan
+            .entries
+            .iter()
+            .find(|entry| entry.item == task_id)
+            .expect("resized task is planned");
+        assert_eq!(
+            planned.window.end - planned.window.start,
+            Duration::minutes(90)
+        );
+    }
+
+    #[test]
+    fn done_takes_precedence_over_a_dynamic_event_resize() {
+        let mut store = Store::new();
+        let mut dynamic = task(1, "Dynamic", Tier::UserShared, false, None);
+        dynamic.status = TaskStatus::Backlog;
+        let task_id = dynamic.id;
+        store.upsert_task(dynamic);
+        store.upsert_calendar_link(task_id, "owned-dynamic".to_string());
+        let event = fetched_event("owned-dynamic", "Dynamic", Some("8"), 60, 150);
+
+        let report = import_from_calendar(
+            &mut store,
+            &[event],
+            at(0),
+            Tier::UserShared,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(report.completed, 1);
+        assert_eq!(report.resized, 0);
+        assert_eq!(store.tasks[&task_id].status, TaskStatus::Done);
+        assert_eq!(store.tasks[&task_id].est_duration, Duration::minutes(30));
+        assert!(store.log.iter().all(|entry| !matches!(
+            entry.kind,
+            ubu_core::LogEntryKind::Command(ubu_core::CommandKind::EditDuration { .. })
+        )));
+    }
+
+    #[test]
+    fn non_positive_dynamic_event_length_does_not_edit_duration() {
+        let mut store = Store::new();
+        let mut dynamic = task(1, "Dynamic", Tier::UserShared, false, None);
+        dynamic.status = TaskStatus::Backlog;
+        let task_id = dynamic.id;
+        store.upsert_task(dynamic);
+        store.upsert_calendar_link(task_id, "owned-dynamic".to_string());
+        for end_minutes in [60, 30] {
+            let event = fetched_event(
+                "owned-dynamic",
+                "Dynamic",
+                None,
+                60,
+                end_minutes,
+            );
+            let report = import_from_calendar(
+                &mut store,
+                &[event],
+                at(0),
+                Tier::UserShared,
+                &BTreeMap::new(),
+            );
+            assert_eq!(report.resized, 0);
+        }
+        assert_eq!(store.tasks[&task_id].est_duration, Duration::minutes(30));
+        assert!(store.log.is_empty());
+    }
+
+    #[test]
+    fn moving_a_same_length_dynamic_event_does_not_edit_duration() {
+        let mut store = Store::new();
+        let mut dynamic = task(1, "Dynamic", Tier::UserShared, false, None);
+        dynamic.status = TaskStatus::Backlog;
+        let task_id = dynamic.id;
+        store.upsert_task(dynamic);
+        store.upsert_calendar_link(task_id, "owned-dynamic".to_string());
+        let event = fetched_event("owned-dynamic", "Dynamic", None, 300, 330);
+
+        let report = import_from_calendar(
+            &mut store,
+            &[event],
+            at(0),
+            Tier::UserShared,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(report.resized, 0);
+        assert_eq!(store.tasks[&task_id].est_duration, Duration::minutes(30));
+        assert!(store.log.is_empty());
+    }
+
+    #[test]
     fn moved_owned_commitment_updates_its_pin_through_edit_pin() {
         let mut store = Store::new();
         let commitment = task(1, "Commitment", Tier::UserShared, true, None);
@@ -1052,6 +1183,7 @@ mod stub_tests {
                 captured: 2,
                 completed: 1,
                 moved: 1,
+                resized: 0,
             }
         );
         let after_first = store.clone();
@@ -1064,6 +1196,7 @@ mod stub_tests {
                 captured: 0,
                 completed: 0,
                 moved: 0,
+                resized: 0,
             }
         );
         assert_eq!(store, after_first);

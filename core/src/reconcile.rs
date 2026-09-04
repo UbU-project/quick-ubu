@@ -283,6 +283,14 @@ mod tests {
             timestamp,
         );
         assert_entry(
+            log_edit_duration(id(1), Duration::minutes(45), timestamp),
+            LogEntryKind::Command(CommandKind::EditDuration {
+                task_id: id(1),
+                est_duration: Duration::minutes(45),
+            }),
+            timestamp,
+        );
+        assert_entry(
             log_edit_pin(id(1), Some(actual_window.clone()), timestamp),
             LogEntryKind::Command(CommandKind::EditPin {
                 task_id: id(1),
@@ -399,6 +407,31 @@ mod tests {
     }
 
     #[test]
+    fn edit_duration_updates_an_existing_task_and_rejects_an_unknown_id() {
+        let task_id = id(1);
+        let unknown = id(99);
+        let new_duration = Duration::minutes(75);
+        let mut store = Store::new();
+        store.upsert_task(task(task_id, Tier::UserShared, DeferPolicy::RescheduleAsap));
+
+        assert_eq!(
+            reconcile(
+                &mut store,
+                &[log_edit_duration(task_id, new_duration, at(1))]
+            ),
+            Ok(())
+        );
+        assert_eq!(store.tasks[&task_id].est_duration, new_duration);
+        assert_eq!(
+            reconcile(
+                &mut store,
+                &[log_edit_duration(unknown, Duration::minutes(15), at(2))]
+            ),
+            Err(CoreError::UnknownTask { id: unknown })
+        );
+    }
+
+    #[test]
     fn reconcile_orders_entries_by_timestamp() {
         let captured = task(id(1), Tier::SemiPublic, DeferPolicy::RescheduleAsap);
         let capture_first = [
@@ -446,6 +479,7 @@ mod tests {
             log_actual(unknown, ActualStatus::Done, None, at(1)),
             log_edit_dep(unknown, vec![id(1)], at(1)),
             log_edit_due(unknown, Some(at(100)), at(1)),
+            log_edit_duration(unknown, Duration::minutes(15), at(1)),
             log_edit_pin(unknown, None, at(1)),
         ];
 
