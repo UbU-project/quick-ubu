@@ -933,6 +933,236 @@ mod tests {
         assert_eq!(store, original);
     }
 
+    #[test]
+    fn enqueue_queues_every_unordered_pair_in_deterministic_order() {
+        let (a, b, c) = graph_ids();
+        let mut store = graph_store();
+
+        assert_eq!(enqueue_incomparable_pairs(&mut store), 3);
+        assert_eq!(
+            store
+                .pending_decisions
+                .iter()
+                .map(|decision| preference_pair(&decision.proposal).unwrap())
+                .collect::<Vec<_>>(),
+            vec![ordered_pair(a, b), ordered_pair(a, c), ordered_pair(b, c)]
+        );
+        assert!(store.pending_decisions.iter().all(|decision| {
+            decision.source == DecisionSource::Elicitation
+                && matches!(
+                    decision.proposal,
+                    Proposal::Preference {
+                        suggested: None,
+                        ..
+                    }
+                )
+        }));
+    }
+
+    #[test]
+    fn enqueue_excludes_related_decided_pending_pinned_and_inactive_pairs() {
+        let (a, b, c) = graph_ids();
+        let d = Uuid::parse_str("dddddddd-0000-0000-0000-000000000004").unwrap();
+        let e = Uuid::parse_str("eeeeeeee-0000-0000-0000-000000000005").unwrap();
+        let mut store = graph_store();
+        let mut pinned = graph_task(d, "Pinned");
+        pinned.pinned = Some(TimeWindow {
+            start: fixed_time(),
+            end: fixed_time() + Duration::minutes(30),
+        });
+        store.upsert_task(pinned);
+        let mut inactive = graph_task(e, "Inactive");
+        inactive.status = TaskStatus::Done;
+        store.upsert_task(inactive);
+        pref_add_ids(&mut store, a, b, false).unwrap();
+        store.decision_history.push(DecisionRecord {
+            proposal: Proposal::Preference {
+                a,
+                b: c,
+                suggested: None,
+            },
+            resolution: Resolution::Skipped,
+            at: fixed_time(),
+        });
+        store
+            .pending_decisions
+            .push(preference_decision(id(10), b, c));
+
+        assert_eq!(enqueue_incomparable_pairs(&mut store), 0);
+        assert_eq!(enqueue_incomparable_pairs(&mut store), 0);
+        assert_eq!(store.pending_decisions.len(), 1);
+    }
+
+    #[test]
+    fn resolve_preference_answers_apply_and_record_confirmed_decisions() {
+        let (a, b, _) = graph_ids();
+        let cases = [
+            (Answer::AStrictB, a, b, Relation::Strict),
+            (Answer::BStrictA, b, a, Relation::Strict),
+            (Answer::Indifferent, a, b, Relation::Indifferent),
+        ];
+
+        for (index, (answer, expected_left, expected_right, expected_relation)) in
+            cases.into_iter().enumerate()
+        {
+            let mut store = graph_store();
+            let decision = preference_decision(id(100 + index as u128), a, b);
+            let proposal = decision.proposal.clone();
+            let decision_id = decision.id;
+            store.pending_decisions.push(decision);
+
+            assert_eq!(
+                resolve_decision(&mut store, decision_id, answer),
+                Ok(Resolution::Confirmed)
+            );
+            assert!(store.pending_decisions.is_empty());
+            assert_eq!(store.decision_history.len(), 1);
+            assert_eq!(store.decision_history[0].proposal, proposal);
+            assert_eq!(store.decision_history[0].resolution, Resolution::Confirmed);
+            assert_eq!(store.preferences.len(), 1);
+            let preference = &store.preferences[0];
+            assert_eq!(preference.relation, expected_relation);
+            assert_eq!(
+                singleton_task_for_bundle(&store, preference.left),
+                Some(expected_left)
+            );
+            assert_eq!(
+                singleton_task_for_bundle(&store, preference.right),
+                Some(expected_right)
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_preference_skip_records_and_removes_without_applying() {
+        let (a, b, _) = graph_ids();
+        let mut store = graph_store();
+        let decision = preference_decision(id(200), a, b);
+        let proposal = decision.proposal.clone();
+        let decision_id = decision.id;
+        store.pending_decisions.push(decision);
+
+        assert_eq!(
+            resolve_decision(&mut store, decision_id, Answer::Skip),
+            Ok(Resolution::Skipped)
+        );
+        assert!(store.pending_decisions.is_empty());
+        assert!(store.preferences.is_empty());
+        assert_eq!(
+            store.decision_history[0],
+            DecisionRecord {
+                proposal,
+                resolution: Resolution::Skipped,
+                at: store.decision_history[0].at,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_preference_cycle_errors_without_changing_store_or_queue() {
+        let (a, b, _) = graph_ids();
+        let mut store = graph_store();
+        pref_add_ids(&mut store, a, b, false).unwrap();
+        store
+            .pending_decisions
+            .push(preference_decision(id(300), b, a));
+        let before = store.clone();
+
+        let error = resolve_decision(&mut store, id(300), Answer::AStrictB).unwrap_err();
+
+        assert!(error.contains("preference cycle"));
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn resolve_dependency_confirm_and_reject_apply_expected_outcomes() {
+        let (a, b, c) = graph_ids();
+        let mut store = graph_store();
+        store
+            .pending_decisions
+            .push(dependency_decision(id(400), a, b));
+        store
+            .pending_decisions
+            .push(dependency_decision(id(401), c, b));
+
+        assert_eq!(
+            resolve_decision(&mut store, id(400), Answer::Confirm),
+            Ok(Resolution::Confirmed)
+        );
+        assert_eq!(store.tasks[&a].blocked_by, vec![b]);
+        assert_eq!(
+            resolve_decision(&mut store, id(401), Answer::Reject),
+            Ok(Resolution::Rejected)
+        );
+        assert!(store.tasks[&c].blocked_by.is_empty());
+        assert!(store.pending_decisions.is_empty());
+        assert_eq!(store.decision_history.len(), 2);
+        assert_eq!(store.decision_history[0].resolution, Resolution::Confirmed);
+        assert_eq!(store.decision_history[1].resolution, Resolution::Rejected);
+    }
+
+    #[test]
+    fn resolve_dependency_cycle_errors_without_changing_store_or_queue() {
+        let (a, b, _) = graph_ids();
+        let mut store = graph_store();
+        dep_add_ids(&mut store, a, b).unwrap();
+        store
+            .pending_decisions
+            .push(dependency_decision(id(500), b, a));
+        let before = store.clone();
+
+        let error = resolve_decision(&mut store, id(500), Answer::Confirm).unwrap_err();
+
+        assert!(error.contains("dependency cycle"));
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn resolve_decision_rejects_unknown_ids_and_wrong_answer_kinds() {
+        let (a, b, _) = graph_ids();
+        let mut preference_store = graph_store();
+        preference_store
+            .pending_decisions
+            .push(preference_decision(id(600), a, b));
+        let preference_before = preference_store.clone();
+        assert!(resolve_decision(&mut preference_store, id(600), Answer::Confirm).is_err());
+        assert_eq!(preference_store, preference_before);
+
+        let mut dependency_store = graph_store();
+        dependency_store
+            .pending_decisions
+            .push(dependency_decision(id(601), a, b));
+        let dependency_before = dependency_store.clone();
+        assert!(resolve_decision(&mut dependency_store, id(601), Answer::Skip).is_err());
+        assert_eq!(dependency_store, dependency_before);
+        assert!(resolve_decision(&mut dependency_store, id(999), Answer::Reject).is_err());
+        assert_eq!(dependency_store, dependency_before);
+    }
+
+    fn preference_decision(decision_id: Id, a: Id, b: Id) -> PendingDecision {
+        PendingDecision {
+            id: decision_id,
+            source: DecisionSource::Elicitation,
+            proposal: Proposal::Preference {
+                a,
+                b,
+                suggested: None,
+            },
+        }
+    }
+
+    fn dependency_decision(decision_id: Id, blocked: Id, blocker: Id) -> PendingDecision {
+        PendingDecision {
+            id: decision_id,
+            source: DecisionSource::Advisor,
+            proposal: Proposal::Dependency { blocked, blocker },
+        }
+    }
+
+    fn id(value: u128) -> Id {
+        Uuid::from_u128(value)
+    }
+
     fn graph_ids() -> (Id, Id, Id) {
         (
             Uuid::parse_str("aaaaaaaa-0000-0000-0000-000000000001").unwrap(),

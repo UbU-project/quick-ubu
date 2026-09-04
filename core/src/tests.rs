@@ -889,6 +889,20 @@ fn store_json_without_pinned_field_defaults_to_dynamic_task() {
 }
 
 #[test]
+fn store_json_without_decision_fields_defaults_to_empty_collections() {
+    let mut value = serde_json::to_value(Store::new()).expect("store serializes");
+    let store = value.as_object_mut().expect("store serializes as an object");
+    store.remove("pending_decisions");
+    store.remove("decision_history");
+    let legacy_json = serde_json::to_string(&value).expect("JSON value serializes");
+
+    let loaded: Store = serde_json::from_str(&legacy_json).expect("legacy store deserializes");
+
+    assert!(loaded.pending_decisions.is_empty());
+    assert!(loaded.decision_history.is_empty());
+}
+
+#[test]
 fn re_plan_is_deterministic_with_pinned_tasks() {
     let store = store_with_tasks(vec![
         Task {
