@@ -345,6 +345,16 @@ mod tests {
     }
 
     #[test]
+    fn generated_task_inherits_template_transparency() {
+        let mut routine = template(1, Recurrence::Daily);
+        routine.transparent = true;
+
+        let tasks = expand_routine(&[routine], date(2026, 9, 1), 1, chrono_tz::UTC);
+
+        assert!(tasks[0].transparent);
+    }
+
+    #[test]
     fn weekly_recurrence_serde_round_trips() {
         let recurrence = Recurrence::Weekly {
             weekdays: [Weekday::Mon, Weekday::Wed].into_iter().collect(),
@@ -550,6 +560,46 @@ mod tests {
             .routines()
             .values()
             .all(|routine| routine.category.is_none()));
+    }
+
+    #[test]
+    fn store_json_without_task_or_routine_transparency_defaults_to_false() {
+        let mut store = Store::new();
+        let mut routine = template(1, Recurrence::Daily);
+        routine.transparent = true;
+        let task = expand_routine(
+            std::slice::from_ref(&routine),
+            date(2026, 9, 1),
+            1,
+            chrono_tz::UTC,
+        )
+        .pop()
+        .unwrap();
+        store.upsert_routine(routine);
+        store.upsert_task(task);
+        let mut value = serde_json::to_value(store).expect("store serializes");
+        for collection in ["tasks", "routines"] {
+            for record in value[collection]
+                .as_object_mut()
+                .expect("store collection serializes as an object")
+                .values_mut()
+            {
+                record
+                    .as_object_mut()
+                    .expect("stored record serializes as an object")
+                    .remove("transparent");
+            }
+        }
+        let legacy_json = serde_json::to_string(&value).expect("JSON serializes");
+        assert!(!legacy_json.contains("transparent"));
+
+        let loaded: Store = serde_json::from_str(&legacy_json).expect("legacy store loads");
+
+        assert!(loaded.tasks.values().all(|task| !task.transparent));
+        assert!(loaded
+            .routines()
+            .values()
+            .all(|routine| !routine.transparent));
     }
 
     #[test]

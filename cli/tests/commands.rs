@@ -68,6 +68,7 @@ fn add_category_sets_it_and_omitting_the_flag_defaults_to_none() {
             "30",
             "--category",
             "business",
+            "--transparent",
         ],
     );
     assert_success(&categorized);
@@ -89,7 +90,9 @@ fn add_category_sets_it_and_omitting_the_flag_defaults_to_none() {
         .find(|task| task.title == "Plain task")
         .unwrap();
     assert_eq!(categorized_task.category.as_deref(), Some("business"));
+    assert!(categorized_task.transparent);
     assert_eq!(plain_task.category, None);
+    assert!(!plain_task.transparent);
 
     let replanned = quick_ubu(
         &store_path,
@@ -97,7 +100,7 @@ fn add_category_sets_it_and_omitting_the_flag_defaults_to_none() {
     );
     assert_success(&replanned);
     let replan_output = String::from_utf8(replanned.stdout).unwrap();
-    assert!(replan_output.contains("Categorized task  business"));
+    assert!(replan_output.contains("Categorized task  business  transparent"));
 
     fs::remove_dir_all(directory).expect("temporary directory is removable");
 }
@@ -162,7 +165,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             duration: Duration::minutes(45),
             affect_cost: 2,
             category: Some("personal".to_string()),
-            transparent: false,
+            transparent: true,
             recurrence: Recurrence::Daily,
         },
         RoutineTemplate {
@@ -201,6 +204,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
     let list_output = String::from_utf8(listed.stdout).unwrap();
     assert!(list_output.contains("Morning focus"));
     assert!(list_output.contains("Morning focus  personal"));
+    assert!(list_output.contains("Morning focus  personal  transparent"));
     assert!(list_output.contains("user-shared"));
     assert!(list_output.contains("06:30:00"));
     assert!(list_output.contains("2700s"));

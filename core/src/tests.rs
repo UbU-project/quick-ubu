@@ -707,6 +707,47 @@ fn pinned_task_is_emitted_at_its_window_and_dynamic_task_uses_a_gap() {
     );
 }
 
+#[test]
+fn transparent_commitment_is_emitted_but_does_not_occupy_its_window() {
+    let mut transparent_commitment = pinned_task(1, 3_600, 36_000);
+    transparent_commitment.transparent = true;
+    let mut dynamic = task(2);
+    dynamic.est_duration = chrono::Duration::minutes(30);
+    let transparent_window = transparent_commitment.pinned.clone().unwrap();
+    let horizon = at(7_200);
+
+    let transparent_plan = re_plan(
+        &store_with_tasks(vec![transparent_commitment.clone(), dynamic.clone()]),
+        ComputeTarget::DesktopOllama,
+        horizon,
+        horizon,
+        &[],
+        &AffectBudget { cap: 10 },
+        &DeterministicPlacer,
+    )
+    .expect("transparent plan is valid");
+    let transparent_dynamic = entry(&transparent_plan, dynamic.id);
+    assert!(transparent_dynamic.window.start >= transparent_window.start);
+    assert!(transparent_dynamic.window.end <= transparent_window.end);
+    assert_eq!(entry(&transparent_plan, transparent_commitment.id).window, transparent_window);
+
+    let mut opaque_commitment = transparent_commitment;
+    opaque_commitment.transparent = false;
+    let opaque_window = opaque_commitment.pinned.clone().unwrap();
+    let opaque_plan = re_plan(
+        &store_with_tasks(vec![opaque_commitment, dynamic]),
+        ComputeTarget::DesktopOllama,
+        horizon,
+        horizon,
+        &[],
+        &AffectBudget { cap: 10 },
+        &DeterministicPlacer,
+    )
+    .expect("opaque plan is valid");
+
+    assert!(entry(&opaque_plan, id(2)).window.start >= opaque_window.end);
+}
+
 proptest! {
     #[test]
     fn prop_unpinned_task_never_overlaps_a_random_pinned_window(

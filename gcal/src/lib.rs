@@ -572,6 +572,45 @@ mod stub_tests {
         );
     }
 
+    #[test]
+    fn google_event_body_writes_both_transparency_values() {
+        let mut calendar_event = event();
+        let opaque = serde_json::to_value(GoogleEventBody::from(&calendar_event)).unwrap();
+        assert_eq!(opaque["transparency"], "opaque");
+
+        calendar_event.transparent = true;
+        let transparent = serde_json::to_value(GoogleEventBody::from(&calendar_event)).unwrap();
+        assert_eq!(transparent["transparency"], "transparent");
+    }
+
+    #[test]
+    fn listed_event_reads_transparent_and_defaults_other_values_to_opaque() {
+        let listed = |transparency: Option<&str>| ListedEvent {
+            id: "event".to_string(),
+            summary: "Summary".to_string(),
+            color_id: None,
+            start: GoogleEventTime {
+                date_time: at(0).to_rfc3339(),
+            },
+            end: GoogleEventTime {
+                date_time: at(30).to_rfc3339(),
+            },
+            transparency: transparency.map(str::to_owned),
+        };
+
+        assert!(
+            FetchedEvent::try_from(listed(Some("transparent")))
+                .unwrap()
+                .transparent
+        );
+        assert!(
+            !FetchedEvent::try_from(listed(Some("opaque")))
+                .unwrap()
+                .transparent
+        );
+        assert!(!FetchedEvent::try_from(listed(None)).unwrap().transparent);
+    }
+
     fn id(value: u128) -> Id {
         Id::from_u128(value)
     }
@@ -816,6 +855,49 @@ mod stub_tests {
             .unwrap();
         assert_eq!(pinned.color_id.as_deref(), Some("5"));
         assert_eq!(dynamic.color_id, None);
+    }
+
+    #[tokio::test]
+    async fn export_preserves_transparency_even_for_a_redacted_task() {
+        let mut store = Store::new();
+        let mut secret = task(1, "Secret", Tier::TopSecret, true, None);
+        secret.transparent = true;
+        store.upsert_task(secret);
+        let transport = StubTransport::default();
+
+        export_plan(
+            &mut store,
+            &plan(&[1]),
+            &transport,
+            &BTreeMap::new(),
+            Tier::UserShared,
+        )
+        .await
+        .unwrap();
+
+        let calls = transport.calls.borrow();
+        let exported = call_event(&calls[0]);
+        assert_eq!(exported.summary, "Busy");
+        assert!(exported.transparent);
+    }
+
+    #[test]
+    fn captured_event_preserves_transparency_on_the_new_task() {
+        let mut store = Store::new();
+        let mut event = fetched_event("transparent-capture", "Available", None, 60, 120);
+        event.transparent = true;
+
+        let report = import_from_calendar(
+            &mut store,
+            std::slice::from_ref(&event),
+            at(0),
+            Tier::UserShared,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(report.captured, 1);
+        let task_id = linked_task_id(&store, &event.id);
+        assert!(store.tasks[&task_id].transparent);
     }
 
     #[test]
