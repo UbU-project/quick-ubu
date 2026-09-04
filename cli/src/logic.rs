@@ -3,9 +3,9 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Duration, Utc};
 use ubu_core::{
     next_task, re_plan, resolve_preferences, topo_order, AffectBudget, Bundle, ComputeTarget,
-    CoreError, DecisionSource, DeferPolicy, DeterministicPlacer, Id, Objective, ObjectiveStatus,
-    PendingDecision, Planner, Preference, Proposal, Provenance, Relation, Store, Task, TaskStatus,
-    Tier, TimeWindow,
+    CoreError, DecisionRecord, DecisionSource, DeferPolicy, DeterministicPlacer, Id, Objective,
+    ObjectiveStatus, PendingDecision, Planner, Preference, Proposal, Provenance, Relation,
+    Resolution, Store, Task, TaskStatus, Tier, TimeWindow,
 };
 use uuid::Uuid;
 
@@ -67,6 +67,16 @@ pub struct ConflictRow {
 }
 
 pub type DependencyRow = (String, String, Vec<String>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    AStrictB,
+    BStrictA,
+    Indifferent,
+    Skip,
+    Confirm,
+    Reject,
+}
 
 pub fn parse_tier(value: &str) -> Result<Tier, String> {
     match value {
@@ -378,6 +388,57 @@ pub fn enqueue_incomparable_pairs(store: &mut Store) -> usize {
     }
 
     added
+}
+
+pub fn resolve_decision(
+    store: &mut Store,
+    decision_id: Id,
+    answer: Answer,
+) -> Result<Resolution, String> {
+    let index = store
+        .pending_decisions
+        .iter()
+        .position(|decision| decision.id == decision_id)
+        .ok_or_else(|| format!("no pending decision matches {decision_id}"))?;
+    let proposal = store.pending_decisions[index].proposal.clone();
+
+    let resolution = match (&proposal, answer) {
+        (Proposal::Preference { a, b, .. }, Answer::AStrictB) => {
+            pref_add_ids(store, *a, *b, false)?;
+            Resolution::Confirmed
+        }
+        (Proposal::Preference { a, b, .. }, Answer::BStrictA) => {
+            pref_add_ids(store, *b, *a, false)?;
+            Resolution::Confirmed
+        }
+        (Proposal::Preference { a, b, .. }, Answer::Indifferent) => {
+            pref_add_ids(store, *a, *b, true)?;
+            Resolution::Confirmed
+        }
+        (Proposal::Preference { .. }, Answer::Skip) => Resolution::Skipped,
+        (Proposal::Dependency { blocked, blocker }, Answer::Confirm) => {
+            dep_add_ids(store, *blocked, *blocker)?;
+            Resolution::Confirmed
+        }
+        (Proposal::Dependency { .. }, Answer::Reject) => Resolution::Rejected,
+        (Proposal::Preference { .. }, Answer::Confirm | Answer::Reject) => {
+            return Err("dependency answer is invalid for a preference decision".to_string());
+        }
+        (
+            Proposal::Dependency { .. },
+            Answer::AStrictB | Answer::BStrictA | Answer::Indifferent | Answer::Skip,
+        ) => {
+            return Err("preference answer is invalid for a dependency decision".to_string());
+        }
+    };
+
+    store.decision_history.push(DecisionRecord {
+        proposal,
+        resolution: resolution.clone(),
+        at: Utc::now(),
+    });
+    store.pending_decisions.remove(index);
+    Ok(resolution)
 }
 
 fn commit_dependencies(store: &mut Store, task_id: Id, blocked_by: Vec<Id>) -> Result<(), String> {
