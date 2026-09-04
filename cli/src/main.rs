@@ -32,6 +32,32 @@ enum Command {
     List,
     Done { prefix: String },
     Defer { prefix: String },
+    DepAdd {
+        task: String,
+        blocker: String,
+    },
+    DepRm {
+        task: String,
+        blocker: String,
+    },
+    DepSet {
+        task: String,
+        blockers: Vec<String>,
+    },
+    DepList {
+        task: Option<String>,
+    },
+    PrefAdd {
+        a: String,
+        b: String,
+        #[arg(long)]
+        eq: bool,
+    },
+    PrefRm {
+        a: String,
+        b: String,
+    },
+    PrefList,
     ObjectiveAdd(ObjectiveAddArgs),
     Replan(ReplanArgs),
     Next(NextArgs),
@@ -203,6 +229,36 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Defer { prefix } => {
             logic::defer(&mut store, &prefix)?;
             persist::save(&cli.store, &store)?;
+        }
+        Command::DepAdd { task, blocker } => {
+            logic::dep_add(&mut store, &task, &blocker)?;
+            persist::save(&cli.store, &store)?;
+        }
+        Command::DepRm { task, blocker } => {
+            logic::dep_rm(&mut store, &task, &blocker)?;
+            persist::save(&cli.store, &store)?;
+        }
+        Command::DepSet { task, blockers } => {
+            logic::dep_set(&mut store, &task, blockers)?;
+            persist::save(&cli.store, &store)?;
+        }
+        Command::DepList { task } => {
+            for (task_id, title, blockers) in logic::dep_list(&store, task)? {
+                println!("{task_id}  {title}  [{}]", blockers.join(", "));
+            }
+        }
+        Command::PrefAdd { a, b, eq } => {
+            logic::pref_add(&mut store, &a, &b, eq)?;
+            persist::save(&cli.store, &store)?;
+        }
+        Command::PrefRm { a, b } => {
+            logic::pref_rm(&mut store, &a, &b)?;
+            persist::save(&cli.store, &store)?;
+        }
+        Command::PrefList => {
+            for line in logic::pref_list(&store) {
+                println!("{line}");
+            }
         }
         Command::ObjectiveAdd(args) => {
             let id = logic::objective_add(
