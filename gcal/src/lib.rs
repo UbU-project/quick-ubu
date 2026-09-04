@@ -21,6 +21,7 @@ pub struct CalendarEvent {
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
     pub color_id: Option<String>,
+    pub transparent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,7 @@ pub struct FetchedEvent {
     pub color_id: Option<String>,
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
+    pub transparent: bool,
 }
 
 #[allow(async_fn_in_trait)]
@@ -129,6 +131,7 @@ struct GoogleEventBody {
     end: GoogleEventTime,
     #[serde(rename = "colorId", skip_serializing_if = "Option::is_none")]
     color_id: Option<String>,
+    transparency: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -148,6 +151,11 @@ impl From<&CalendarEvent> for GoogleEventBody {
                 date_time: event.end.to_rfc3339(),
             },
             color_id: event.color_id.clone(),
+            transparency: if event.transparent {
+                "transparent".to_string()
+            } else {
+                "opaque".to_string()
+            },
         }
     }
 }
@@ -172,6 +180,8 @@ struct ListedEvent {
     color_id: Option<String>,
     start: GoogleEventTime,
     end: GoogleEventTime,
+    #[serde(default)]
+    transparency: Option<String>,
 }
 
 impl TryFrom<ListedEvent> for FetchedEvent {
@@ -188,6 +198,7 @@ impl TryFrom<ListedEvent> for FetchedEvent {
             end: DateTime::parse_from_rfc3339(&event.end.date_time)
                 .map_err(|error| format!("invalid Google Calendar end dateTime: {error}"))?
                 .with_timezone(&Utc),
+            transparent: event.transparency.as_deref() == Some("transparent"),
         })
     }
 }
@@ -308,6 +319,7 @@ pub async fn export_plan<T: CalendarTransport>(
             } else {
                 None
             },
+            transparent: task.transparent,
         };
         let existing_event_id = store.calendar_link(entry.item).cloned();
 
@@ -392,7 +404,7 @@ pub fn import_from_calendar(
             earliest_start: None,
             category: if is_commitment { category } else { None },
             pinned: is_commitment.then_some(window),
-            transparent: false,
+            transparent: event.transparent,
             blocked_by: Vec::new(),
             defer_policy: DeferPolicy::RescheduleAsap,
             status: if is_commitment {
@@ -511,6 +523,7 @@ mod stub_tests {
             start: DateTime::from_timestamp(0, 0).unwrap(),
             end: DateTime::from_timestamp(60, 0).unwrap(),
             color_id: None,
+            transparent: false,
         }
     }
 
@@ -545,6 +558,7 @@ mod stub_tests {
             color_id: Some("5".to_string()),
             start: DateTime::from_timestamp(0, 0).unwrap(),
             end: DateTime::from_timestamp(60, 0).unwrap(),
+            transparent: false,
         };
         let stub = StubTransport::with_events(vec![expected.clone()]);
 
@@ -634,6 +648,7 @@ mod stub_tests {
             color_id: color_id.map(str::to_owned),
             start: at(start_minutes),
             end: at(end_minutes),
+            transparent: false,
         }
     }
 
