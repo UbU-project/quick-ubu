@@ -230,6 +230,107 @@ mod tests {
     }
 
     #[test]
+    fn monthly_first_workday_handles_saturday_sunday_and_weekday_starts() {
+        for (year, month, expected_day) in [(2026, 8, 3), (2026, 11, 2), (2026, 9, 1)] {
+            let expected = date(year, month, expected_day);
+            assert_eq!(first_workday_of_month(year, month), expected);
+            for day in 1..=31 {
+                if let Some(candidate) = NaiveDate::from_ymd_opt(year, month, day) {
+                    assert_eq!(
+                        matches_date(&Recurrence::MonthlyFirstWorkday, candidate),
+                        candidate == expected
+                    );
+                }
+            }
+            let tasks = expand_routine(
+                &[template(1, Recurrence::MonthlyFirstWorkday)],
+                date(year, month, 1),
+                7,
+                chrono_tz::UTC,
+            );
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(pinned_start(&tasks[0]).date_naive(), expected);
+        }
+    }
+
+    #[test]
+    fn quarterly_first_workday_matches_only_the_four_quarter_starts() {
+        for (year, days) in [(2022, [3, 1, 1, 3]), (2023, [2, 3, 3, 2])] {
+            let expected: Vec<_> = [1, 4, 7, 10]
+                .into_iter()
+                .zip(days)
+                .map(|(month, day)| date(year, month, day))
+                .collect();
+            let from = date(year, 1, 1);
+            for offset in 0..365 {
+                let candidate = from + Days::new(offset);
+                assert_eq!(
+                    matches_date(&Recurrence::QuarterlyFirstWorkday, candidate),
+                    expected.contains(&candidate)
+                );
+            }
+            let tasks = expand_routine(
+                &[template(1, Recurrence::QuarterlyFirstWorkday)],
+                from,
+                365,
+                chrono_tz::UTC,
+            );
+            assert_eq!(
+                tasks
+                    .iter()
+                    .map(|task| pinned_start(task).date_naive())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn generated_tasks_inherit_reminders_including_at_start_and_empty() {
+        for reminders in [vec![10, 0], vec![]] {
+            let mut routine = template(1, Recurrence::Daily);
+            routine.reminders = reminders.clone();
+            let mut store = Store::new();
+            store.upsert_routine(routine);
+            let report = generate_routine_tasks(&mut store, date(2026, 9, 1), 2, chrono_tz::UTC);
+            assert_eq!(report.created, 2);
+            assert!(store.tasks.values().all(|task| task.reminders == reminders));
+        }
+    }
+
+    #[test]
+    fn store_json_without_task_or_routine_reminders_defaults_to_empty() {
+        let mut routine = template(1, Recurrence::Daily);
+        routine.reminders = vec![10, 0];
+        let mut store = Store::new();
+        store.upsert_routine(routine);
+        generate_routine_tasks(&mut store, date(2026, 9, 1), 1, chrono_tz::UTC);
+        let mut value = serde_json::to_value(&store).unwrap();
+        for collection in ["tasks", "routines"] {
+            for record in value[collection].as_object_mut().unwrap().values_mut() {
+                record.as_object_mut().unwrap().remove("reminders");
+            }
+        }
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(!json.contains("reminders"));
+        let loaded: Store = serde_json::from_str(&json).unwrap();
+        assert!(loaded.tasks.values().all(|task| task.reminders.is_empty()));
+        assert!(loaded
+            .routines()
+            .values()
+            .all(|routine| routine.reminders.is_empty()));
+        store
+            .tasks
+            .values_mut()
+            .for_each(|task| task.reminders.clear());
+        store
+            .routines
+            .values_mut()
+            .for_each(|routine| routine.reminders.clear());
+        assert_eq!(loaded, store);
+    }
+
+    #[test]
     fn writes_canonical_routine_example() {
         let mut daily = template(1, Recurrence::Daily);
         daily.title = "Daily check-in".to_string();
