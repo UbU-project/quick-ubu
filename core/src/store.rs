@@ -26,6 +26,9 @@ pub struct Store {
     /// task id -> Google Calendar event id, for idempotent create-or-update.
     #[serde(default)]
     pub calendar_links: BTreeMap<Id, String>,
+    /// task id -> signature of what was last exported to Google.
+    #[serde(default)]
+    pub export_signatures: BTreeMap<Id, String>,
     /// category -> Google Calendar event colorId overrides.
     #[serde(default)]
     pub category_colors: BTreeMap<String, String>,
