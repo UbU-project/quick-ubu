@@ -621,6 +621,8 @@ fn print_next(output: Option<logic::ScheduleRow>) {
 fn recurrence_summary(recurrence: &Recurrence) -> String {
     match recurrence {
         Recurrence::Daily => "Daily".to_string(),
+        Recurrence::MonthlyFirstWorkday => "MonthlyFirstWorkday".to_string(),
+        Recurrence::QuarterlyFirstWorkday => "QuarterlyFirstWorkday".to_string(),
         Recurrence::Weekly { weekdays } => format!(
             "Weekly[{}]",
             weekdays

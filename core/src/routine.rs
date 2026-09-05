@@ -15,6 +15,8 @@ const NAMESPACE: Uuid = Uuid::from_u128(0x6f51_89f1_6208_5c1e_a8ec_15c0f894ea9d)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Recurrence {
     Daily,
+    MonthlyFirstWorkday,
+    QuarterlyFirstWorkday,
     Weekly {
         #[serde(
             serialize_with = "serialize_weekdays",
@@ -72,9 +74,26 @@ pub struct GenerateReport {
     pub skipped: usize,
 }
 
+fn first_workday_of_month(year: i32, month: u32) -> NaiveDate {
+    let first = NaiveDate::from_ymd_opt(year, month, 1).expect("valid year and month");
+    let offset = match first.weekday() {
+        Weekday::Sat => 2,
+        Weekday::Sun => 1,
+        _ => 0,
+    };
+    first + Days::new(offset)
+}
+
 fn matches_date(recurrence: &Recurrence, date: NaiveDate) -> bool {
     match recurrence {
         Recurrence::Daily => true,
+        Recurrence::MonthlyFirstWorkday => {
+            date == first_workday_of_month(date.year(), date.month())
+        }
+        Recurrence::QuarterlyFirstWorkday => {
+            matches!(date.month(), 1 | 4 | 7 | 10)
+                && date == first_workday_of_month(date.year(), date.month())
+        }
         Recurrence::Weekly { weekdays } => weekdays.contains(date.weekday()),
         Recurrence::MonthlyDay { days } => days.contains(&date.day()),
     }
