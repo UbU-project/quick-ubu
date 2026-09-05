@@ -24,6 +24,7 @@ pub struct AddInput {
     pub pin: Option<DateTime<Utc>>,
     pub category: Option<String>,
     pub transparent: bool,
+    pub reminders: Vec<i32>,
     pub objective_prefixes: Vec<String>,
     pub blocked_by_prefixes: Vec<String>,
 }
@@ -55,6 +56,7 @@ pub struct ScheduleRow {
     pub title: String,
     pub category: Option<String>,
     pub transparent: bool,
+    pub reminders: Vec<i32>,
     pub window: TimeWindow,
 }
 
@@ -362,6 +364,7 @@ pub fn add(store: &mut Store, input: AddInput) -> Result<Id, String> {
         category: input.category,
         pinned,
         transparent: input.transparent,
+        reminders: input.reminders,
         blocked_by,
         defer_policy: DeferPolicy::RescheduleAsap,
         status,
@@ -824,6 +827,7 @@ pub fn replan_with_planner(
             title: task_title(store, entry.item),
             category: task_category(store, entry.item),
             transparent: task_transparent(store, entry.item),
+            reminders: task_reminders(store, entry.item),
             window: entry.window,
         })
         .collect::<Vec<_>>();
@@ -883,6 +887,7 @@ pub fn next(
                 title: task_title(store, task_id),
                 category: task_category(store, task_id),
                 transparent: task_transparent(store, task_id),
+                reminders: task_reminders(store, task_id),
                 window: entry.window.clone(),
             })
     }))
@@ -912,6 +917,14 @@ fn task_category(store: &Store, id: Id) -> Option<String> {
 
 fn task_transparent(store: &Store, id: Id) -> bool {
     store.tasks.get(&id).is_some_and(|task| task.transparent)
+}
+
+fn task_reminders(store: &Store, id: Id) -> Vec<i32> {
+    store
+        .tasks
+        .get(&id)
+        .map(|task| task.reminders.clone())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1453,6 +1466,7 @@ mod tests {
             &mut store,
             AddInput {
                 title: "Run first loop".to_string(),
+                reminders: Vec::new(),
                 duration_minutes: 30,
                 tier: Tier::UserShared,
                 affect_cost: 10,
@@ -1492,6 +1506,7 @@ mod tests {
             &mut store,
             AddInput {
                 title: "Too draining".to_string(),
+                reminders: Vec::new(),
                 duration_minutes: 30,
                 tier: Tier::UserShared,
                 affect_cost: 101,
@@ -1938,6 +1953,7 @@ mod tests {
             defer_policy: DeferPolicy::RescheduleAsap,
             status: TaskStatus::Backlog,
             provenance: Provenance::Manual,
+            reminders: Vec::new(),
             commitment: None,
         }
     }

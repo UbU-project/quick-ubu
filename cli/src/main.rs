@@ -100,6 +100,9 @@ struct AddArgs {
     category: Option<String>,
     #[arg(long)]
     transparent: bool,
+    /// Popup reminder minutes before start (0 = at start); repeat for multiple reminders.
+    #[arg(long = "reminder", allow_negative_numbers = true)]
+    reminders: Vec<i32>,
     #[arg(long)]
     objective: Vec<String>,
     #[arg(long)]
@@ -209,6 +212,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     pin: parse_optional_datetime(args.pin)?,
                     category: args.category,
                     transparent: args.transparent,
+                    reminders: args.reminders,
                     objective_prefixes: args.objective,
                     blocked_by_prefixes: args.blocked_by,
                 },
@@ -366,7 +370,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::RoutineList => {
             for routine in store.routines().values() {
                 println!(
-                    "{}  {}  {}  {}  {}  {}  {}s  {}",
+                    "{}  {}  {}  {}  {}  {}  {}s  {}{}",
                     short_id(routine.id),
                     routine.title,
                     routine.category.as_deref().unwrap_or(""),
@@ -374,7 +378,8 @@ fn run(cli: Cli) -> Result<(), String> {
                     tier_name(routine.tier),
                     routine.start_time,
                     routine.duration.num_seconds(),
-                    recurrence_summary(&routine.recurrence)
+                    recurrence_summary(&routine.recurrence),
+                    reminder_marker(&routine.reminders)
                 );
             }
         }
@@ -575,13 +580,14 @@ fn print_replan(output: logic::ReplanOutput) {
     println!("Schedule:");
     for entry in output.schedule {
         println!(
-            "{}–{}  {}  {}  {} ({})",
+            "{}–{}  {}  {}  {} ({}){}",
             entry.window.start.format("%H:%M"),
             entry.window.end.format("%H:%M"),
             entry.title,
             entry.category.as_deref().unwrap_or(""),
             transparency_marker(entry.transparent),
-            short_id(entry.id)
+            short_id(entry.id),
+            reminder_marker(&entry.reminders)
         );
     }
 
@@ -621,6 +627,8 @@ fn print_next(output: Option<logic::ScheduleRow>) {
 fn recurrence_summary(recurrence: &Recurrence) -> String {
     match recurrence {
         Recurrence::Daily => "Daily".to_string(),
+        Recurrence::MonthlyFirstWorkday => "MonthlyFirstWorkday".to_string(),
+        Recurrence::QuarterlyFirstWorkday => "QuarterlyFirstWorkday".to_string(),
         Recurrence::Weekly { weekdays } => format!(
             "Weekly[{}]",
             weekdays
@@ -636,6 +644,17 @@ fn recurrence_summary(recurrence: &Recurrence) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
+    }
+}
+
+fn reminder_marker(reminders: &[i32]) -> String {
+    if reminders.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "  reminders:[{}]m",
+            reminders.iter().map(i32::to_string).collect::<Vec<_>>().join(",")
+        )
     }
 }
 

@@ -15,6 +15,8 @@ const NAMESPACE: Uuid = Uuid::from_u128(0x6f51_89f1_6208_5c1e_a8ec_15c0f894ea9d)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Recurrence {
     Daily,
+    MonthlyFirstWorkday,
+    QuarterlyFirstWorkday,
     Weekly {
         #[serde(
             serialize_with = "serialize_weekdays",
@@ -63,6 +65,12 @@ pub struct RoutineTemplate {
     /// event). Default false = opaque/blocking.
     #[serde(default)]
     pub transparent: bool,
+    /// Popup reminders, minutes-before-start (0 = fire at the event's start).
+    /// Empty = no reminder. The at-start (0) reminder is the mobile "do next"
+    /// signal: Google Calendar has no other cue for what to do now, so an event
+    /// with no reminder is effectively invisible on the phone.
+    #[serde(default)]
+    pub reminders: Vec<i32>,
     pub recurrence: Recurrence,
 }
 
@@ -72,9 +80,26 @@ pub struct GenerateReport {
     pub skipped: usize,
 }
 
+fn first_workday_of_month(year: i32, month: u32) -> NaiveDate {
+    let first = NaiveDate::from_ymd_opt(year, month, 1).expect("valid year and month");
+    let offset = match first.weekday() {
+        Weekday::Sat => 2,
+        Weekday::Sun => 1,
+        _ => 0,
+    };
+    first + Days::new(offset)
+}
+
 fn matches_date(recurrence: &Recurrence, date: NaiveDate) -> bool {
     match recurrence {
         Recurrence::Daily => true,
+        Recurrence::MonthlyFirstWorkday => {
+            date == first_workday_of_month(date.year(), date.month())
+        }
+        Recurrence::QuarterlyFirstWorkday => {
+            matches!(date.month(), 1 | 4 | 7 | 10)
+                && date == first_workday_of_month(date.year(), date.month())
+        }
         Recurrence::Weekly { weekdays } => weekdays.contains(date.weekday()),
         Recurrence::MonthlyDay { days } => days.contains(&date.day()),
     }
@@ -125,6 +150,7 @@ pub fn expand_routine(
                 defer_policy: DeferPolicy::RescheduleAsap,
                 status: TaskStatus::Scheduled,
                 provenance: Provenance::Manual,
+                reminders: template.reminders.clone(),
                 commitment: None,
             });
         }
@@ -194,12 +220,150 @@ mod tests {
             affect_cost: 3,
             category: None,
             transparent: false,
+            reminders: Vec::new(),
             recurrence,
         }
     }
 
     fn pinned_start(task: &Task) -> chrono::DateTime<Utc> {
         task.pinned.as_ref().expect("routine task is pinned").start
+    }
+
+    #[test]
+    fn monthly_first_workday_handles_saturday_sunday_and_weekday_starts() {
+        for (year, month, expected_day) in [(2026, 8, 3), (2026, 11, 2), (2026, 9, 1)] {
+            let expected = date(year, month, expected_day);
+            assert_eq!(first_workday_of_month(year, month), expected);
+            for day in 1..=31 {
+                if let Some(candidate) = NaiveDate::from_ymd_opt(year, month, day) {
+                    assert_eq!(
+                        matches_date(&Recurrence::MonthlyFirstWorkday, candidate),
+                        candidate == expected
+                    );
+                }
+            }
+            let tasks = expand_routine(
+                &[template(1, Recurrence::MonthlyFirstWorkday)],
+                date(year, month, 1),
+                7,
+                chrono_tz::UTC,
+            );
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(pinned_start(&tasks[0]).date_naive(), expected);
+        }
+    }
+
+    #[test]
+    fn quarterly_first_workday_matches_only_the_four_quarter_starts() {
+        for (year, days) in [(2022, [3, 1, 1, 3]), (2023, [2, 3, 3, 2])] {
+            let expected: Vec<_> = [1, 4, 7, 10]
+                .into_iter()
+                .zip(days)
+                .map(|(month, day)| date(year, month, day))
+                .collect();
+            let from = date(year, 1, 1);
+            for offset in 0..365 {
+                let candidate = from + Days::new(offset);
+                assert_eq!(
+                    matches_date(&Recurrence::QuarterlyFirstWorkday, candidate),
+                    expected.contains(&candidate)
+                );
+            }
+            let tasks = expand_routine(
+                &[template(1, Recurrence::QuarterlyFirstWorkday)],
+                from,
+                365,
+                chrono_tz::UTC,
+            );
+            assert_eq!(
+                tasks
+                    .iter()
+                    .map(|task| pinned_start(task).date_naive())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn generated_tasks_inherit_reminders_including_at_start_and_empty() {
+        for reminders in [vec![10, 0], vec![]] {
+            let mut routine = template(1, Recurrence::Daily);
+            routine.reminders = reminders.clone();
+            let mut store = Store::new();
+            store.upsert_routine(routine);
+            let report = generate_routine_tasks(&mut store, date(2026, 9, 1), 2, chrono_tz::UTC);
+            assert_eq!(report.created, 2);
+            assert!(store.tasks.values().all(|task| task.reminders == reminders));
+        }
+    }
+
+    #[test]
+    fn store_json_without_task_or_routine_reminders_defaults_to_empty() {
+        let mut routine = template(1, Recurrence::Daily);
+        routine.reminders = vec![10, 0];
+        let mut store = Store::new();
+        store.upsert_routine(routine);
+        generate_routine_tasks(&mut store, date(2026, 9, 1), 1, chrono_tz::UTC);
+        let mut value = serde_json::to_value(&store).unwrap();
+        for collection in ["tasks", "routines"] {
+            for record in value[collection].as_object_mut().unwrap().values_mut() {
+                record.as_object_mut().unwrap().remove("reminders");
+            }
+        }
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(!json.contains("reminders"));
+        let loaded: Store = serde_json::from_str(&json).unwrap();
+        assert!(loaded.tasks.values().all(|task| task.reminders.is_empty()));
+        assert!(loaded
+            .routines()
+            .values()
+            .all(|routine| routine.reminders.is_empty()));
+        store
+            .tasks
+            .values_mut()
+            .for_each(|task| task.reminders.clear());
+        store
+            .routines
+            .values_mut()
+            .for_each(|routine| routine.reminders.clear());
+        assert_eq!(loaded, store);
+    }
+
+    #[test]
+    fn writes_canonical_routine_example() {
+        let mut daily = template(1, Recurrence::Daily);
+        daily.title = "Daily check-in".to_string();
+        daily.duration = Duration::minutes(10);
+        daily.category = Some("personal".to_string());
+        daily.transparent = true;
+        daily.reminders = vec![0];
+        let mut weekly = template(
+            2,
+            Recurrence::Weekly {
+                weekdays: [Weekday::Mon, Weekday::Wed].into_iter().collect(),
+            },
+        );
+        weekly.title = "Weekly review".to_string();
+        weekly.duration = Duration::minutes(30);
+        weekly.reminders = vec![10, 0];
+        let mut monthly = template(3, Recurrence::MonthlyFirstWorkday);
+        monthly.title = "Monthly planning".to_string();
+        let mut quarterly = template(4, Recurrence::QuarterlyFirstWorkday);
+        quarterly.title = "Quarterly planning".to_string();
+        quarterly.duration = Duration::minutes(60);
+        let routines = vec![daily, weekly, monthly, quarterly];
+        let json = serde_json::to_string_pretty(&routines).unwrap() + "\n";
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/example-routine.json");
+        // This test deliberately regenerates the committed wire-format example.
+        std::fs::write(&path, &json).expect("canonical example must be writable");
+        let saved = std::fs::read_to_string(path).unwrap();
+        assert_eq!(saved, json);
+        assert_eq!(
+            serde_json::from_str::<Vec<RoutineTemplate>>(&saved).unwrap(),
+            routines
+        );
     }
 
     #[test]

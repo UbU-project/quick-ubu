@@ -22,6 +22,7 @@ pub struct CalendarEvent {
     pub end: DateTime<Utc>,
     pub color_id: Option<String>,
     pub transparent: bool,
+    pub reminders: Vec<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +133,20 @@ struct GoogleEventBody {
     #[serde(rename = "colorId", skip_serializing_if = "Option::is_none")]
     color_id: Option<String>,
     transparency: String,
+    reminders: GoogleReminders,
+}
+
+#[derive(Serialize)]
+struct GoogleReminders {
+    #[serde(rename = "useDefault")]
+    use_default: bool,
+    overrides: Vec<GoogleReminder>,
+}
+
+#[derive(Serialize)]
+struct GoogleReminder {
+    method: &'static str,
+    minutes: i32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -155,6 +170,17 @@ impl From<&CalendarEvent> for GoogleEventBody {
                 "transparent".to_string()
             } else {
                 "opaque".to_string()
+            },
+            reminders: GoogleReminders {
+                use_default: false,
+                overrides: event
+                    .reminders
+                    .iter()
+                    .map(|minutes| GoogleReminder {
+                        method: "popup",
+                        minutes: *minutes,
+                    })
+                    .collect(),
             },
         }
     }
@@ -320,6 +346,7 @@ pub async fn export_plan<T: CalendarTransport>(
                 None
             },
             transparent: task.transparent,
+            reminders: task.reminders.clone(),
         };
         let existing_event_id = store.calendar_link(entry.item).cloned();
 
@@ -421,6 +448,7 @@ pub fn import_from_calendar(
                 TaskStatus::Backlog
             },
             provenance: Provenance::Manual,
+            reminders: Vec::new(),
             commitment: None,
         };
         entries.push(log_capture(task, now));
@@ -529,6 +557,7 @@ mod stub_tests {
     fn event() -> CalendarEvent {
         CalendarEvent {
             summary: "test".to_string(),
+            reminders: Vec::new(),
             start: DateTime::from_timestamp(0, 0).unwrap(),
             end: DateTime::from_timestamp(60, 0).unwrap(),
             color_id: None,
@@ -593,6 +622,109 @@ mod stub_tests {
     }
 
     #[test]
+    fn google_event_body_writes_popup_overrides_and_disables_defaults_when_empty() {
+        let mut calendar_event = event();
+        calendar_event.reminders = vec![10, 0];
+        let body = serde_json::to_value(GoogleEventBody::from(&calendar_event)).unwrap();
+        assert_eq!(
+            body["reminders"],
+            serde_json::json!({
+                "useDefault": false,
+                "overrides": [{"method": "popup", "minutes": 10}, {"method": "popup", "minutes": 0}]
+            })
+        );
+        calendar_event.reminders.clear();
+        let body = serde_json::to_value(GoogleEventBody::from(&calendar_event)).unwrap();
+        assert_eq!(
+            body["reminders"],
+            serde_json::json!({"useDefault": false, "overrides": []})
+        );
+    }
+
+    #[tokio::test]
+    async fn routine_reminders_flow_through_generation_and_export_create_update_and_clear() {
+        let routine = ubu_core::RoutineTemplate {
+            id: id(90),
+            title: "Daily reminder".to_string(),
+            tier: Tier::UserShared,
+            start_time: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            duration: Duration::minutes(30),
+            affect_cost: 0,
+            category: None,
+            transparent: false,
+            reminders: vec![10, 0],
+            recurrence: ubu_core::Recurrence::Daily,
+        };
+        let mut store = Store::new();
+        store.upsert_routine(routine);
+        ubu_core::generate_routine_tasks(&mut store, at(0).date_naive(), 1, ubu_core::Tz::UTC);
+        let task_id = *store.tasks.keys().next().unwrap();
+        let plan = re_plan(
+            &store,
+            ComputeTarget::DesktopOllama,
+            at(0),
+            at(0),
+            &[],
+            &AffectBudget { cap: 100 },
+            &DeterministicPlacer,
+        )
+        .unwrap();
+        assert_eq!(plan.entries.len(), 1);
+        let transport = StubTransport::default();
+        for (index, reminders) in [vec![10, 0], vec![5, 0], vec![]].into_iter().enumerate() {
+            if index > 0 {
+                store.tasks.get_mut(&task_id).unwrap().reminders = reminders.clone();
+            }
+            transport.calls.borrow_mut().clear();
+            let report = export_plan(
+                &mut store,
+                &plan,
+                &transport,
+                &BTreeMap::new(),
+                Tier::UserShared,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                report,
+                ExportReport {
+                    created: usize::from(index == 0),
+                    updated: usize::from(index > 0)
+                }
+            );
+            let calls = transport.calls.borrow();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(call_event(&calls[0]).reminders, reminders);
+            if index == 0 {
+                assert!(matches!(&calls[0], StubCall::Create(_)));
+            } else {
+                assert!(
+                    matches!(&calls[0], StubCall::Update { event_id, .. } if event_id == "event-1")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dynamic_task_export_preserves_reminders() {
+        let mut store = Store::new();
+        let mut dynamic = task(1, "Dynamic reminder", Tier::UserShared, false, None);
+        dynamic.reminders = vec![0];
+        store.upsert_task(dynamic);
+        let transport = StubTransport::default();
+        export_plan(
+            &mut store,
+            &plan(&[1]),
+            &transport,
+            &BTreeMap::new(),
+            Tier::UserShared,
+        )
+        .await
+        .unwrap();
+        assert_eq!(call_event(&transport.calls.borrow()[0]).reminders, vec![0]);
+    }
+
+    #[test]
     fn listed_event_reads_transparent_and_defaults_other_values_to_opaque() {
         let listed = |transparency: Option<&str>| ListedEvent {
             id: "event".to_string(),
@@ -650,6 +782,7 @@ mod stub_tests {
             defer_policy: DeferPolicy::RescheduleAsap,
             status: TaskStatus::Scheduled,
             provenance: Provenance::Manual,
+            reminders: Vec::new(),
             commitment: None,
         }
     }

@@ -29,6 +29,119 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
+fn add_repeatable_reminders_persist_and_appear_in_replan() {
+    let (directory, store_path) = temp_store();
+    assert_success(&quick_ubu(
+        &store_path,
+        &[
+            "add",
+            "--title",
+            "Notify me",
+            "--duration",
+            "15",
+            "--reminder",
+            "10",
+            "--reminder",
+            "0",
+        ],
+    ));
+    assert_success(&quick_ubu(
+        &store_path,
+        &["add", "--title", "Quiet task", "--duration", "15"],
+    ));
+    let store: Store = serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
+    assert_eq!(
+        store
+            .tasks
+            .values()
+            .find(|task| task.title == "Notify me")
+            .unwrap()
+            .reminders,
+        vec![10, 0]
+    );
+    assert!(store
+        .tasks
+        .values()
+        .find(|task| task.title == "Quiet task")
+        .unwrap()
+        .reminders
+        .is_empty());
+    let output = quick_ubu(
+        &store_path,
+        &["replan", "--horizon", "2099-01-01T00:00:00Z"],
+    );
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout
+        .lines()
+        .any(|line| line.contains("Notify me") && line.contains("reminders:[10,0]m")));
+    assert!(stdout
+        .lines()
+        .any(|line| line.contains("Quiet task") && !line.contains("reminders:")));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn canonical_routines_import_list_generate_and_replan_with_reminders() {
+    let (directory, store_path) = temp_store();
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/example-routine.json");
+    assert_success(&quick_ubu(
+        &store_path,
+        &["routine-import", example.to_str().unwrap()],
+    ));
+    let output = quick_ubu(&store_path, &["routine-list"]);
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("MonthlyFirstWorkday"));
+    assert!(stdout.contains("QuarterlyFirstWorkday"));
+    assert!(stdout
+        .lines()
+        .any(|line| line.contains("Daily check-in") && line.contains("reminders:[0]m")));
+    assert!(stdout
+        .lines()
+        .any(|line| line.contains("Weekly review") && line.contains("reminders:[10,0]m")));
+    assert!(stdout
+        .lines()
+        .any(|line| line.contains("Monthly planning") && !line.contains("reminders:")));
+    assert_success(&quick_ubu(
+        &store_path,
+        &[
+            "generate",
+            "--from",
+            "2099-01-01",
+            "--days",
+            "7",
+            "--tz",
+            "UTC",
+        ],
+    ));
+    let store: Store = serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
+    assert!(store
+        .tasks
+        .values()
+        .any(|task| task.title == "Monthly planning"));
+    assert!(store
+        .tasks
+        .values()
+        .any(|task| task.title == "Quarterly planning"));
+    assert!(store
+        .tasks
+        .values()
+        .filter(|task| task.title == "Daily check-in")
+        .all(|task| task.reminders == vec![0]));
+    let output = quick_ubu(
+        &store_path,
+        &["replan", "--horizon", "2099-01-01T00:00:00Z"],
+    );
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout
+        .lines()
+        .any(|line| line.contains("Daily check-in") && line.contains("reminders:[0]m")));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn set_model_command_persists_and_replaces_the_model() {
     let (directory, store_path) = temp_store();
     for model in ["first-model", "replacement-model"] {
@@ -192,6 +305,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             affect_cost: 2,
             category: Some("personal".to_string()),
             transparent: true,
+            reminders: Vec::new(),
             recurrence: Recurrence::Daily,
         },
         RoutineTemplate {
@@ -203,6 +317,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             affect_cost: 1,
             category: None,
             transparent: false,
+            reminders: Vec::new(),
             recurrence: Recurrence::MonthlyDay {
                 days: [1, 15].into_iter().collect(),
             },

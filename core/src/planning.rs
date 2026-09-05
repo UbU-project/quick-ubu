@@ -406,6 +406,7 @@ mod tests {
             defer_policy: DeferPolicy::ReturnToBacklog,
             status,
             provenance: Provenance::Manual,
+            reminders: Vec::new(),
             commitment: None,
         }
     }

@@ -1,0 +1,74 @@
+[
+  {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "title": "Daily check-in",
+    "tier": "UserShared",
+    "start_time": "06:30:00",
+    "duration": [
+      600,
+      0
+    ],
+    "affect_cost": 3,
+    "category": "personal",
+    "transparent": true,
+    "reminders": [
+      0
+    ],
+    "recurrence": "Daily"
+  },
+  {
+    "id": "00000000-0000-0000-0000-000000000002",
+    "title": "Weekly review",
+    "tier": "UserShared",
+    "start_time": "06:30:00",
+    "duration": [
+      1800,
+      0
+    ],
+    "affect_cost": 3,
+    "category": null,
+    "transparent": false,
+    "reminders": [
+      10,
+      0
+    ],
+    "recurrence": {
+      "Weekly": {
+        "weekdays": [
+          "Mon",
+          "Wed"
+        ]
+      }
+    }
+  },
+  {
+    "id": "00000000-0000-0000-0000-000000000003",
+    "title": "Monthly planning",
+    "tier": "UserShared",
+    "start_time": "06:30:00",
+    "duration": [
+      2700,
+      0
+    ],
+    "affect_cost": 3,
+    "category": null,
+    "transparent": false,
+    "reminders": [],
+    "recurrence": "MonthlyFirstWorkday"
+  },
+  {
+    "id": "00000000-0000-0000-0000-000000000004",
+    "title": "Quarterly planning",
+    "tier": "UserShared",
+    "start_time": "06:30:00",
+    "duration": [
+      3600,
+      0
+    ],
+    "affect_cost": 3,
+    "category": null,
+    "transparent": false,
+    "reminders": [],
+    "recurrence": "QuarterlyFirstWorkday"
+  }
+]

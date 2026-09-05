@@ -86,6 +86,7 @@ mod tests {
             defer_policy: DeferPolicy::ReturnToBacklog,
             status: TaskStatus::Backlog,
             provenance: Provenance::Manual,
+            reminders: Vec::new(),
             commitment: None,
         }
     }
