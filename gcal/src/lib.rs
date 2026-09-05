@@ -421,6 +421,7 @@ pub fn import_from_calendar(
                 TaskStatus::Backlog
             },
             provenance: Provenance::Manual,
+            reminders: Vec::new(),
             commitment: None,
         };
         entries.push(log_capture(task, now));
@@ -650,6 +651,7 @@ mod stub_tests {
             defer_policy: DeferPolicy::RescheduleAsap,
             status: TaskStatus::Scheduled,
             provenance: Provenance::Manual,
+            reminders: Vec::new(),
             commitment: None,
         }
     }

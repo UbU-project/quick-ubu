@@ -215,6 +215,7 @@ mod tests {
             defer_policy,
             status: TaskStatus::Scheduled,
             provenance: Provenance::Manual,
+            reminders: Vec::new(),
             commitment: None,
         }
     }

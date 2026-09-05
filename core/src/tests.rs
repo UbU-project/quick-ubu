@@ -47,6 +47,7 @@ fn task(n: u128) -> Task {
         defer_policy: DeferPolicy::RescheduleAsap,
         status: TaskStatus::Backlog,
         provenance: Provenance::Manual,
+        reminders: Vec::new(),
         commitment: None,
     }
 }

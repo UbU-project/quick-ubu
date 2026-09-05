@@ -113,6 +113,12 @@ pub struct Task {
     /// event). Default false = opaque/blocking.
     #[serde(default)]
     pub transparent: bool,
+    /// Popup reminders, minutes-before-start (0 = fire at the event's start).
+    /// Empty = no reminder. The at-start (0) reminder is the mobile "do next"
+    /// signal: Google Calendar has no other cue for what to do now, so an event
+    /// with no reminder is effectively invisible on the phone.
+    #[serde(default)]
+    pub reminders: Vec<i32>,
     /// precedence edges (dynamic)
     pub blocked_by: Vec<Id>,
     pub defer_policy: DeferPolicy,

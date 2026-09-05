@@ -366,6 +366,7 @@ pub fn add(store: &mut Store, input: AddInput) -> Result<Id, String> {
         defer_policy: DeferPolicy::RescheduleAsap,
         status,
         provenance: Provenance::Manual,
+        reminders: Vec::new(),
         commitment: None,
     });
     Ok(id)
@@ -1938,6 +1939,7 @@ mod tests {
             defer_policy: DeferPolicy::RescheduleAsap,
             status: TaskStatus::Backlog,
             provenance: Provenance::Manual,
+            reminders: Vec::new(),
             commitment: None,
         }
     }

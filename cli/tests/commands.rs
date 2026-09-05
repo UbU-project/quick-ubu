@@ -192,6 +192,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             affect_cost: 2,
             category: Some("personal".to_string()),
             transparent: true,
+            reminders: Vec::new(),
             recurrence: Recurrence::Daily,
         },
         RoutineTemplate {
@@ -203,6 +204,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             affect_cost: 1,
             category: None,
             transparent: false,
+            reminders: Vec::new(),
             recurrence: Recurrence::MonthlyDay {
                 days: [1, 15].into_iter().collect(),
             },

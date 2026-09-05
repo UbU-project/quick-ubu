@@ -65,6 +65,12 @@ pub struct RoutineTemplate {
     /// event). Default false = opaque/blocking.
     #[serde(default)]
     pub transparent: bool,
+    /// Popup reminders, minutes-before-start (0 = fire at the event's start).
+    /// Empty = no reminder. The at-start (0) reminder is the mobile "do next"
+    /// signal: Google Calendar has no other cue for what to do now, so an event
+    /// with no reminder is effectively invisible on the phone.
+    #[serde(default)]
+    pub reminders: Vec<i32>,
     pub recurrence: Recurrence,
 }
 
@@ -144,6 +150,7 @@ pub fn expand_routine(
                 defer_policy: DeferPolicy::RescheduleAsap,
                 status: TaskStatus::Scheduled,
                 provenance: Provenance::Manual,
+                reminders: template.reminders.clone(),
                 commitment: None,
             });
         }
@@ -213,6 +220,7 @@ mod tests {
             affect_cost: 3,
             category: None,
             transparent: false,
+            reminders: Vec::new(),
             recurrence,
         }
     }
