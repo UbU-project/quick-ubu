@@ -720,6 +720,119 @@ mod tests {
     use super::*;
 
     #[test]
+    fn effective_colors_include_every_legacy_default() {
+        let colors = effective_color_map(&ubu_core::Store::new(), None).unwrap();
+        let expected = [
+            ("personal", "3"),
+            ("relationship", "5"),
+            ("business", "6"),
+            ("committed", "11"),
+            ("location", "8"),
+            ("entertainment", "1"),
+            ("grocery", "2"),
+            ("commute", "7"),
+            ("undefined", "4"),
+            ("education_house", "10"),
+            ("work", "9"),
+        ];
+        assert_eq!(colors.len(), expected.len());
+        for (category, color) in expected {
+            assert_eq!(colors[category], color);
+        }
+    }
+
+    #[test]
+    fn effective_colors_overlay_store_then_file_per_category() {
+        let mut store = ubu_core::Store::new();
+        store.set_category_color("personal".into(), "5".into());
+        store.set_category_color("custom".into(), "8".into());
+        let persisted = effective_color_map(&store, None).unwrap();
+        assert_eq!(persisted["personal"], "5");
+        assert_eq!(persisted["work"], "9");
+        assert_eq!(persisted["custom"], "8");
+
+        let path = std::env::temp_dir().join(format!("gc-4-colors-{}.json", uuid::Uuid::new_v4()));
+        fs::write(&path, r#"{"personal":"7","file_only":"2"}"#).unwrap();
+        let colors = effective_color_map(&store, Some(&path)).unwrap();
+        assert_eq!(colors["personal"], "7");
+        assert_eq!(colors["work"], "9");
+        assert_eq!(colors["custom"], "8");
+        assert_eq!(colors["file_only"], "2");
+        assert_eq!(store.category_colors["personal"], "5");
+
+        fs::write(&path, "invalid JSON").unwrap();
+        assert!(effective_color_map(&store, Some(&path))
+            .unwrap_err()
+            .contains("failed to parse"));
+        fs::remove_file(&path).unwrap();
+        assert!(effective_color_map(&store, Some(&path))
+            .unwrap_err()
+            .contains("failed to read"));
+    }
+
+    #[test]
+    fn legacy_store_without_category_colors_loads_empty_and_uses_defaults() {
+        let path = std::env::temp_dir().join(format!("gc-4-legacy-{}.json", uuid::Uuid::new_v4()));
+        fs::write(
+            &path,
+            r#"{"objectives":{},"tasks":{},"bundles":{},"preferences":[],"log":[]}"#,
+        )
+        .unwrap();
+        let mut store = persist::load(&path).unwrap();
+        assert!(store.category_colors.is_empty());
+        assert_eq!(
+            effective_color_map(&store, None).unwrap(),
+            default_category_colors()
+        );
+
+        store.set_category_color("personal".into(), "7".into());
+        persist::save(&path, &store).unwrap();
+        assert_eq!(
+            persist::load(&path).unwrap().category_colors["personal"],
+            "7"
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn import_captures_inverse_categories_from_effective_colors_without_http() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        let event = gcal::FetchedEvent {
+            id: "colored-event".into(),
+            summary: "Routine".into(),
+            color_id: Some("3".into()),
+            start: now,
+            end: now + Duration::minutes(30),
+            transparent: false,
+        };
+        let path = std::env::temp_dir().join(format!("gc-4-import-{}.json", uuid::Uuid::new_v4()));
+        fs::write(&path, r#"{"work":"9","relationship":"3"}"#).unwrap();
+        for (layer, expected) in [(0, "personal"), (1, "work"), (2, "relationship")] {
+            let mut store = ubu_core::Store::new();
+            if layer > 0 {
+                store.set_category_color("work".into(), "3".into());
+            }
+            let inverse = effective_color_map(&store, (layer == 2).then_some(path.as_path()))
+                .unwrap()
+                .into_iter()
+                .map(|(category, color)| (color, category))
+                .collect();
+            let report = import_from_calendar(
+                &mut store,
+                std::slice::from_ref(&event),
+                now,
+                Tier::UserShared,
+                &inverse,
+            );
+            assert_eq!(report.captured, 1);
+            let captured = store.tasks.values().next().unwrap();
+            assert_eq!(captured.category.as_deref(), Some(expected));
+            assert!(captured.pinned.is_some());
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn advisor_and_replan_parse_optional_model_and_transport_settings_without_http() {
         let cli = Cli::try_parse_from(["quick-ubu", "advise"]).unwrap();
         match cli.command {

@@ -864,6 +864,35 @@ mod stub_tests {
     }
 
     #[tokio::test]
+    async fn default_colors_color_pinned_personal_but_leave_dynamic_default() {
+        let mut store = Store::new();
+        store.upsert_task(task(1, "Routine", Tier::UserShared, true, Some("personal")));
+        store.upsert_task(task(
+            2,
+            "Dynamic",
+            Tier::UserShared,
+            false,
+            Some("personal"),
+        ));
+        let transport = StubTransport::default();
+
+        export_plan(
+            &mut store,
+            &plan(&[1, 2]),
+            &transport,
+            &default_category_colors(),
+            Tier::UserShared,
+        )
+        .await
+        .unwrap();
+
+        let calls = transport.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(call_event(&calls[0]).color_id.as_deref(), Some("3"));
+        assert_eq!(call_event(&calls[1]).color_id, None);
+    }
+
+    #[tokio::test]
     async fn export_creates_one_event_per_entry_and_populates_links() {
         let mut store = Store::new();
         store.upsert_task(task(1, "First", Tier::UserShared, false, None));

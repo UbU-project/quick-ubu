@@ -715,7 +715,7 @@ mod tests {
             }
         }
         let legacy_json = serde_json::to_string(&value).expect("JSON serializes");
-        assert!(!legacy_json.contains("category"));
+        assert!(!legacy_json.contains("\"category\""));
 
         let loaded: Store = serde_json::from_str(&legacy_json).expect("legacy store loads");
 
