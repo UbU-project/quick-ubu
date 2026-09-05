@@ -230,6 +230,42 @@ mod tests {
     }
 
     #[test]
+    fn writes_canonical_routine_example() {
+        let mut daily = template(1, Recurrence::Daily);
+        daily.title = "Daily check-in".to_string();
+        daily.duration = Duration::minutes(10);
+        daily.category = Some("personal".to_string());
+        daily.transparent = true;
+        daily.reminders = vec![0];
+        let mut weekly = template(
+            2,
+            Recurrence::Weekly {
+                weekdays: [Weekday::Mon, Weekday::Wed].into_iter().collect(),
+            },
+        );
+        weekly.title = "Weekly review".to_string();
+        weekly.duration = Duration::minutes(30);
+        weekly.reminders = vec![10, 0];
+        let mut monthly = template(3, Recurrence::MonthlyFirstWorkday);
+        monthly.title = "Monthly planning".to_string();
+        let mut quarterly = template(4, Recurrence::QuarterlyFirstWorkday);
+        quarterly.title = "Quarterly planning".to_string();
+        quarterly.duration = Duration::minutes(60);
+        let routines = vec![daily, weekly, monthly, quarterly];
+        let json = serde_json::to_string_pretty(&routines).unwrap() + "\n";
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/example-routine.json");
+        // This test deliberately regenerates the committed wire-format example.
+        std::fs::write(&path, &json).expect("canonical example must be writable");
+        let saved = std::fs::read_to_string(path).unwrap();
+        assert_eq!(saved, json);
+        assert_eq!(
+            serde_json::from_str::<Vec<RoutineTemplate>>(&saved).unwrap(),
+            routines
+        );
+    }
+
+    #[test]
     fn daily_expands_once_per_day_across_the_range() {
         let tasks = expand_routine(
             &[template(1, Recurrence::Daily)],
