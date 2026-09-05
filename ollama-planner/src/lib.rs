@@ -16,9 +16,47 @@ pub struct OllamaHttpTransport {
     pub timeout_secs: u64,
 }
 
+impl OllamaHttpTransport {
+    fn request_body(&self, prompt: &str) -> serde_json::Value {
+        json!({
+            "model": self.model,
+            "prompt": prompt,
+            "stream": false,
+            "format": "json",
+            // API equivalent of `ollama run --think=false`. Thinking output is
+            // already omitted by parse_generate_response (`--hidethinking`).
+            "think": false,
+        })
+    }
+}
+
 #[derive(Deserialize)]
 struct GenerateResponse {
     response: String,
+    done: Option<bool>,
+    done_reason: Option<String>,
+    prompt_eval_count: Option<u64>,
+    eval_count: Option<u64>,
+    thinking: Option<String>,
+}
+
+fn parse_generate_response(body: &str, model: &str) -> Result<String, String> {
+    let body: GenerateResponse = serde_json::from_str(body).map_err(|error| error.to_string())?;
+    if body.response.trim().is_empty() {
+        // Report completion metadata without exposing the prompt or thinking text.
+        let diagnostics = json!({
+            "model": model,
+            "done": body.done,
+            "done_reason": body.done_reason,
+            "prompt_eval_count": body.prompt_eval_count,
+            "eval_count": body.eval_count,
+            "thinking_present": body.thinking.as_ref().is_some_and(|text| !text.trim().is_empty()),
+        });
+        return Err(format!(
+            "Ollama returned an empty answer in the response field; completion diagnostics: {diagnostics}"
+        ));
+    }
+    Ok(body.response)
 }
 
 #[derive(Deserialize)]
@@ -32,22 +70,14 @@ impl LlmTransport for OllamaHttpTransport {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(self.timeout_secs))
             .build();
-        let body = json!({
-            "model": self.model,
-            "prompt": prompt,
-            "stream": false,
-            "format": "json",
-        })
-        .to_string();
+        let body = self.request_body(prompt).to_string();
         let response = agent
             .post(&url)
             .set("Content-Type", "application/json")
             .send_string(&body)
             .map_err(|error| error.to_string())?;
         let body = response.into_string().map_err(|error| error.to_string())?;
-        serde_json::from_str::<GenerateResponse>(&body)
-            .map(|body| body.response)
-            .map_err(|error| error.to_string())
+        parse_generate_response(&body, &self.model)
     }
 }
 
@@ -194,6 +224,89 @@ mod tests {
     impl LlmTransport for StubTransport {
         fn generate(&self, _prompt: &str) -> Result<String, String> {
             self.response.clone()
+        }
+    }
+
+    #[test]
+    fn generation_request_disables_thinking_with_a_boolean() {
+        let transport = OllamaHttpTransport {
+            base_url: "http://unused.invalid".into(),
+            model: "test-model".into(),
+            timeout_secs: 300,
+        };
+        let body = transport.request_body("Return only JSON");
+        assert_eq!(body["think"].as_bool(), Some(false));
+        assert_eq!(body["stream"].as_bool(), Some(false));
+        assert_eq!(body["format"], "json");
+        assert!(body.get("hidethinking").is_none());
+    }
+
+    #[test]
+    fn thinking_text_is_hidden_when_an_answer_is_present() {
+        let answer = r#"{"dependencies":[],"preferences":[]}"#;
+        let body = json!({
+            "response": answer,
+            "thinking": "private thinking text",
+            "done": true,
+            "done_reason": "stop",
+        });
+        assert_eq!(
+            parse_generate_response(&body.to_string(), "test-model").unwrap(),
+            answer
+        );
+    }
+
+    #[test]
+    fn empty_answers_report_completion_metadata_without_thinking_text() {
+        for answer in ["", " \n\t"] {
+            let body = json!({
+                "response": answer,
+                "done": true,
+                "done_reason": "length",
+                "prompt_eval_count": 120,
+                "eval_count": 256,
+                "thinking": "private thinking text",
+            });
+            let error = parse_generate_response(&body.to_string(), "test-model").unwrap_err();
+            assert!(error.starts_with("Ollama returned an empty answer"));
+            let (_, diagnostics) = error.split_once("completion diagnostics: ").unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(diagnostics).unwrap(),
+                json!({
+                    "model": "test-model",
+                    "done": true,
+                    "done_reason": "length",
+                    "prompt_eval_count": 120,
+                    "eval_count": 256,
+                    "thinking_present": true,
+                })
+            );
+            assert!(!error.contains("private thinking text"));
+        }
+    }
+
+    #[test]
+    fn empty_answer_without_optional_metadata_still_reports_clear_error() {
+        let error = parse_generate_response(r#"{"response":""}"#, "test-model").unwrap_err();
+        assert!(error.starts_with("Ollama returned an empty answer"));
+        assert!(error.contains(r#""done_reason":null"#));
+        assert!(error.contains(r#""thinking_present":false"#));
+    }
+
+    #[test]
+    fn nonempty_answers_are_preserved_and_invalid_envelopes_still_fail() {
+        for answer in [
+            " {\"dependencies\":[],\"preferences\":[]}\n",
+            "invalid advisor JSON",
+        ] {
+            let body = json!({"response": answer});
+            assert_eq!(
+                parse_generate_response(&body.to_string(), "test-model").unwrap(),
+                answer
+            );
+        }
+        for body in ["", "invalid JSON", "{}", r#"{"response":null}"#] {
+            assert!(parse_generate_response(body, "test-model").is_err());
         }
     }
 

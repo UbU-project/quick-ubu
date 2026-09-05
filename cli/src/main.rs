@@ -74,7 +74,7 @@ enum Command {
         model: Option<String>,
         #[arg(long, default_value = "http://localhost:11434")]
         ollama_url: String,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = 300)]
         ollama_timeout: u64,
     },
     ObjectiveAdd(ObjectiveAddArgs),
@@ -138,7 +138,7 @@ struct ReplanArgs {
     ollama_url: String,
     #[arg(long)]
     model: Option<String>,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = 300)]
     ollama_timeout: u64,
 }
 
@@ -843,7 +843,7 @@ mod tests {
             } => {
                 assert_eq!(model, None);
                 assert_eq!(ollama_url, "http://localhost:11434");
-                assert_eq!(ollama_timeout, 30);
+                assert_eq!(ollama_timeout, 300);
             }
             _ => panic!("expected advise"),
         }
