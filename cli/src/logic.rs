@@ -1,11 +1,14 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
 
 use chrono::{DateTime, Duration, Utc};
+use ollama_planner::LlmTransport;
+use serde_json::{json, Value};
 use ubu_core::{
     next_task, re_plan, resolve_preferences, topo_order, AffectBudget, Bundle, ComputeTarget,
     CoreError, DecisionRecord, DecisionSource, DeferPolicy, DeterministicPlacer, Id, Objective,
-    ObjectiveStatus, PendingDecision, Planner, Preference, Proposal, Provenance, Relation,
-    Resolution, Store, Task, TaskStatus, Tier, TimeWindow,
+    ObjectiveStatus, PendingDecision, Planner, PrefSuggestion, Preference, Proposal, Provenance,
+    Relation, Resolution, Store, Task, TaskStatus, Tier, TimeWindow,
 };
 use uuid::Uuid;
 
@@ -86,6 +89,225 @@ pub fn resolve_model(store: &Store, model_override: Option<String>) -> Result<St
     model_override
         .or_else(|| store.ollama_model.clone())
         .ok_or_else(|| "no ollama model set; run: quick-ubu set-model <name>".to_string())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Proposed {
+    pub deps: Vec<(Id, Id)>,
+    pub prefs: Vec<(Id, Id, PrefSuggestion)>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AdviseReport {
+    pub enqueued: usize,
+    pub dropped_known: usize,
+    pub dropped_cycle: usize,
+}
+
+pub fn build_advisor_prompt(store: &Store) -> (String, Vec<Id>) {
+    let index_map: Vec<_> = store
+        .tasks
+        .values()
+        .filter(|task| {
+            matches!(task.status, TaskStatus::Backlog | TaskStatus::Scheduled)
+                && task.pinned.is_none()
+        })
+        .map(|task| task.id)
+        .collect();
+    let indices: BTreeMap<_, _> = index_map
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index + 1))
+        .collect();
+    let mut prompt = String::from("Propose dependency and preference additions for these tasks:\n");
+    for (index, id) in index_map.iter().enumerate() {
+        writeln!(prompt, "[{}] {}", index + 1, store.tasks[id].title)
+            .expect("writing to a String cannot fail");
+    }
+    // Only relations with both endpoints listed can be expressed in index terms.
+    let mut dependencies = Vec::new();
+    for id in &index_map {
+        for blocker in &store.tasks[id].blocked_by {
+            if let Some(blocker_index) = indices.get(blocker) {
+                dependencies.push(json!({"blocked": indices[id], "blocker": blocker_index}));
+            }
+        }
+    }
+    let mut preferences = Vec::new();
+    for preference in &store.preferences {
+        let (Some(a), Some(b)) = (
+            singleton_task_for_bundle(store, preference.left),
+            singleton_task_for_bundle(store, preference.right),
+        ) else {
+            continue;
+        };
+        if let (Some(a), Some(b)) = (indices.get(&a), indices.get(&b)) {
+            let relation = match preference.relation {
+                Relation::Strict => "a_strict_b",
+                Relation::Indifferent => "indifferent",
+            };
+            preferences.push(json!({"a": a, "b": b, "relation": relation}));
+        }
+    }
+    writeln!(
+        prompt,
+        "Existing relations: {}",
+        json!({"dependencies": dependencies, "preferences": preferences})
+    )
+    .expect("writing to a String cannot fail");
+    prompt.push_str(
+        "Return ONLY additions as JSON: {\"dependencies\":[{\"blocked\":N,\"blocker\":M}],\"preferences\":[{\"a\":N,\"b\":M,\"relation\":\"a_strict_b|b_strict_a|indifferent\"}]}. Choose one of the three relation strings for each preference. Use only listed indices (starting at 1); do not repeat existing relations; do not create cycles; output only the JSON object. Use empty arrays when there are no additions.",
+    );
+    (prompt, index_map)
+}
+
+pub fn parse_proposals(text: &str, index_map: &[Id]) -> Result<Proposed, String> {
+    let value: Value =
+        serde_json::from_str(text).map_err(|error| format!("invalid advisor JSON: {error}"))?;
+    let array = |key: &str| {
+        value[key]
+            .as_array()
+            .ok_or_else(|| format!("advisor {key} must be an array"))
+    };
+    let task_id = |entry: &Value, key: &str| {
+        entry[key]
+            .as_u64()
+            .and_then(|index| index.checked_sub(1))
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| index_map.get(index).copied())
+            .ok_or_else(|| format!("advisor {key} index must be in 1..={}", index_map.len()))
+    };
+    let mut proposed = Proposed::default();
+    for entry in array("dependencies")? {
+        proposed
+            .deps
+            .push((task_id(entry, "blocked")?, task_id(entry, "blocker")?));
+    }
+    for entry in array("preferences")? {
+        let relation = match entry["relation"].as_str() {
+            Some("a_strict_b") => PrefSuggestion::AStrictB,
+            Some("b_strict_a") => PrefSuggestion::BStrictA,
+            Some("indifferent") => PrefSuggestion::Indifferent,
+            _ => return Err("invalid advisor preference relation".to_string()),
+        };
+        proposed
+            .prefs
+            .push((task_id(entry, "a")?, task_id(entry, "b")?, relation));
+    }
+    Ok(proposed)
+}
+
+fn advisor_pair(proposal: &Proposal) -> (Id, Id) {
+    match proposal {
+        Proposal::Dependency { blocked, blocker } => ordered_pair(*blocked, *blocker),
+        Proposal::Preference { a, b, .. } => ordered_pair(*a, *b),
+    }
+}
+
+pub fn filter_and_enqueue(store: &mut Store, proposed: Proposed) -> AdviseReport {
+    let mut known = BTreeSet::new();
+    for task in store.tasks.values() {
+        known.extend(
+            task.blocked_by
+                .iter()
+                .map(|blocker| ordered_pair(task.id, *blocker)),
+        );
+    }
+    for preference in &store.preferences {
+        if let (Some(a), Some(b)) = (
+            singleton_task_for_bundle(store, preference.left),
+            singleton_task_for_bundle(store, preference.right),
+        ) {
+            known.insert(ordered_pair(a, b));
+        }
+    }
+    known.extend(
+        store
+            .decision_history
+            .iter()
+            .map(|record| advisor_pair(&record.proposal)),
+    );
+    known.extend(
+        store
+            .pending_decisions
+            .iter()
+            .map(|decision| advisor_pair(&decision.proposal)),
+    );
+
+    let mut validation = store.clone();
+    let mut report = AdviseReport::default();
+    // The response has two ordered arrays: dependencies first, then preferences.
+    let proposals = proposed
+        .deps
+        .into_iter()
+        .map(|(blocked, blocker)| Proposal::Dependency { blocked, blocker })
+        .chain(
+            proposed
+                .prefs
+                .into_iter()
+                .map(|(a, b, suggested)| Proposal::Preference {
+                    a,
+                    b,
+                    suggested: Some(suggested),
+                }),
+        );
+    for proposal in proposals {
+        let pair = advisor_pair(&proposal);
+        if known.contains(&pair) {
+            report.dropped_known += 1;
+            continue;
+        }
+        let result = match &proposal {
+            Proposal::Dependency { blocked, blocker } => {
+                dep_add_ids(&mut validation, *blocked, *blocker)
+            }
+            Proposal::Preference {
+                a,
+                b,
+                suggested: Some(PrefSuggestion::AStrictB),
+            } => pref_add_ids(&mut validation, *a, *b, false),
+            Proposal::Preference {
+                a,
+                b,
+                suggested: Some(PrefSuggestion::BStrictA),
+            } => pref_add_ids(&mut validation, *b, *a, false),
+            Proposal::Preference {
+                a,
+                b,
+                suggested: Some(PrefSuggestion::Indifferent),
+            } => pref_add_ids(&mut validation, *a, *b, true),
+            Proposal::Preference {
+                suggested: None, ..
+            } => unreachable!("advisor always suggests a relation"),
+        };
+        if result.is_err() {
+            // The specified report has only one validation-failure bucket; this
+            // also includes self-relations and errors from an invalid input store.
+            report.dropped_cycle += 1;
+            continue;
+        }
+        known.insert(pair);
+        store.pending_decisions.push(PendingDecision {
+            id: Uuid::new_v4(),
+            source: DecisionSource::Advisor,
+            proposal,
+        });
+        report.enqueued += 1;
+    }
+    report
+}
+
+pub fn advise(
+    store: &mut Store,
+    transport: &dyn LlmTransport,
+    model_override: Option<String>,
+) -> Result<AdviseReport, String> {
+    // LlmTransport accepts only a prompt; the caller configures its model.
+    resolve_model(store, model_override)?;
+    let (prompt, index_map) = build_advisor_prompt(store);
+    let text = transport.generate(&prompt)?;
+    let proposed = parse_proposals(&text, &index_map)?;
+    Ok(filter_and_enqueue(store, proposed))
 }
 
 pub fn parse_tier(value: &str) -> Result<Tier, String> {
