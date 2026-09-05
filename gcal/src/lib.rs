@@ -22,6 +22,7 @@ pub struct CalendarEvent {
     pub end: DateTime<Utc>,
     pub color_id: Option<String>,
     pub transparent: bool,
+    pub reminders: Vec<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +133,20 @@ struct GoogleEventBody {
     #[serde(rename = "colorId", skip_serializing_if = "Option::is_none")]
     color_id: Option<String>,
     transparency: String,
+    reminders: GoogleReminders,
+}
+
+#[derive(Serialize)]
+struct GoogleReminders {
+    #[serde(rename = "useDefault")]
+    use_default: bool,
+    overrides: Vec<GoogleReminder>,
+}
+
+#[derive(Serialize)]
+struct GoogleReminder {
+    method: &'static str,
+    minutes: i32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -155,6 +170,17 @@ impl From<&CalendarEvent> for GoogleEventBody {
                 "transparent".to_string()
             } else {
                 "opaque".to_string()
+            },
+            reminders: GoogleReminders {
+                use_default: false,
+                overrides: event
+                    .reminders
+                    .iter()
+                    .map(|minutes| GoogleReminder {
+                        method: "popup",
+                        minutes: *minutes,
+                    })
+                    .collect(),
             },
         }
     }
@@ -320,6 +346,7 @@ pub async fn export_plan<T: CalendarTransport>(
                 None
             },
             transparent: task.transparent,
+            reminders: task.reminders.clone(),
         };
         let existing_event_id = store.calendar_link(entry.item).cloned();
 
@@ -530,6 +557,7 @@ mod stub_tests {
     fn event() -> CalendarEvent {
         CalendarEvent {
             summary: "test".to_string(),
+            reminders: Vec::new(),
             start: DateTime::from_timestamp(0, 0).unwrap(),
             end: DateTime::from_timestamp(60, 0).unwrap(),
             color_id: None,
