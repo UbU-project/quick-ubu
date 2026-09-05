@@ -45,6 +45,28 @@ pub struct CalendarEvent {
     pub reminders: Vec<i32>,
 }
 
+fn event_signature(event: &CalendarEvent) -> String {
+    #[derive(Serialize)]
+    struct EventSignature<'a> {
+        summary: &'a str,
+        start: String,
+        end: String,
+        color_id: Option<&'a str>,
+        transparent: bool,
+        reminders: &'a [i32],
+    }
+
+    serde_json::to_string(&EventSignature {
+        summary: &event.summary,
+        start: event.start.to_rfc3339(),
+        end: event.end.to_rfc3339(),
+        color_id: event.color_id.as_deref(),
+        transparent: event.transparent,
+        reminders: &event.reminders,
+    })
+    .expect("event signature fields are JSON serializable")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedEvent {
     pub id: String,
