@@ -65,6 +65,10 @@ enum Command {
     Review,
     Prioritize,
     SetModel { name: String },
+    /// Persist a category's Google Calendar event colorId.
+    SetColor { category: String, color_id: String },
+    /// List category colors with persisted overrides applied.
+    ColorList,
     Advise {
         #[arg(long)]
         model: Option<String>,
@@ -304,6 +308,15 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::SetModel { name } => {
             logic::set_model(&mut store, name);
             persist::save(&cli.store, &store)?;
+        }
+        Command::SetColor { category, color_id } => {
+            store.set_category_color(category, color_id);
+            persist::save(&cli.store, &store)?;
+        }
+        Command::ColorList => {
+            for (category, color_id) in effective_color_map(&store, None)? {
+                println!("{category}  {color_id}");
+            }
         }
         Command::Advise {
             model,
