@@ -7,7 +7,10 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc, Weekday};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use gcal::{export_plan, import_from_calendar, CalendarTransport, GoogleCalendarTransport};
+use gcal::{
+    default_category_colors, export_plan, import_from_calendar, CalendarTransport,
+    GoogleCalendarTransport,
+};
 use ollama_planner::{OllamaHttpTransport, OllamaPlanner};
 use ubu_core::{
     generate_routine_tasks, re_plan, AffectBudget, ComputeTarget, DeterministicPlacer, Planner,
@@ -406,7 +409,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 &DeterministicPlacer,
             )
             .map_err(|error| format!("export planning failed: {error:?}"))?;
-            let color_map = load_color_map(args.color_config.as_deref())?;
+            let color_map = effective_color_map(&store, args.color_config.as_deref())?;
             let transport =
                 GoogleCalendarTransport::new(args.credentials, args.token_cache, args.calendar_id);
             let runtime = tokio::runtime::Runtime::new()
@@ -435,7 +438,8 @@ fn run(cli: Cli) -> Result<(), String> {
                 .map(logic::parse_datetime)
                 .transpose()?
                 .unwrap_or(now + Duration::days(7));
-            let color_to_category = load_color_map(args.color_config.as_deref())?
+            // Duplicate colors resolve to the alphabetically last category.
+            let color_to_category = effective_color_map(&store, args.color_config.as_deref())?
                 .into_iter()
                 .map(|(category, color_id)| (color_id, category))
                 .collect();
@@ -574,6 +578,16 @@ fn load_color_map(path: Option<&Path>) -> Result<BTreeMap<String, String>, Strin
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     serde_json::from_str(&contents)
         .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+}
+
+fn effective_color_map(
+    store: &ubu_core::Store,
+    color_config: Option<&Path>,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut colors = default_category_colors();
+    colors.extend(store.category_colors.clone());
+    colors.extend(load_color_map(color_config)?);
+    Ok(colors)
 }
 
 fn print_replan(output: logic::ReplanOutput) {
