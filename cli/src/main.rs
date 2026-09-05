@@ -61,6 +61,7 @@ enum Command {
     PrefList,
     Review,
     Prioritize,
+    SetModel { name: String },
     ObjectiveAdd(ObjectiveAddArgs),
     Replan(ReplanArgs),
     Next(NextArgs),
@@ -117,7 +118,7 @@ struct ReplanArgs {
     planner: PlannerChoice,
     #[arg(long, default_value = "http://localhost:11434")]
     ollama_url: String,
-    #[arg(long, required_if_eq("planner", "ollama"))]
+    #[arg(long)]
     model: Option<String>,
     #[arg(long, default_value_t = 30)]
     ollama_timeout: u64,
@@ -285,6 +286,10 @@ fn run(cli: Cli) -> Result<(), String> {
             persist::save(&cli.store, &store)?;
             println!("{id}");
         }
+        Command::SetModel { name } => {
+            logic::set_model(&mut store, name);
+            persist::save(&cli.store, &store)?;
+        }
         Command::Replan(args) => {
             let now = Utc::now();
             let horizon = match args.horizon {
@@ -296,9 +301,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     logic::replan(&store, now, horizon, args.affect_cap)
                 }
                 PlannerChoice::Ollama => {
-                    let model = args
-                        .model
-                        .expect("clap requires --model when --planner ollama");
+                    let model = logic::resolve_model(&store, args.model)?;
                     let planner = OllamaPlanner::new(OllamaHttpTransport {
                         base_url: args.ollama_url,
                         model,

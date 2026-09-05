@@ -78,6 +78,16 @@ pub enum Answer {
     Reject,
 }
 
+pub fn set_model(store: &mut Store, name: String) {
+    store.ollama_model = Some(name);
+}
+
+pub fn resolve_model(store: &Store, model_override: Option<String>) -> Result<String, String> {
+    model_override
+        .or_else(|| store.ollama_model.clone())
+        .ok_or_else(|| "no ollama model set; run: quick-ubu set-model <name>".to_string())
+}
+
 pub fn parse_tier(value: &str) -> Result<Tier, String> {
     match value {
         "semi-public" => Ok(Tier::SemiPublic),
