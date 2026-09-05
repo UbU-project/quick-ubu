@@ -26,6 +26,9 @@ pub struct Store {
     /// task id -> Google Calendar event id, for idempotent create-or-update.
     #[serde(default)]
     pub calendar_links: BTreeMap<Id, String>,
+    /// category -> Google Calendar event colorId overrides.
+    #[serde(default)]
+    pub category_colors: BTreeMap<String, String>,
     /// append-only SessionLog
     pub log: Vec<LogEntry>,
 }
@@ -109,6 +112,10 @@ impl Store {
 
     pub fn calendar_link(&self, task_id: Id) -> Option<&String> {
         self.calendar_links.get(&task_id)
+    }
+
+    pub fn set_category_color(&mut self, category: String, color_id: String) {
+        self.category_colors.insert(category, color_id);
     }
 
     pub fn append_log(&mut self, entry: LogEntry) {
