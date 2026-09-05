@@ -62,6 +62,14 @@ enum Command {
     Review,
     Prioritize,
     SetModel { name: String },
+    Advise {
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value = "http://localhost:11434")]
+        ollama_url: String,
+        #[arg(long, default_value_t = 30)]
+        ollama_timeout: u64,
+    },
     ObjectiveAdd(ObjectiveAddArgs),
     Replan(ReplanArgs),
     Next(NextArgs),
@@ -289,6 +297,24 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::SetModel { name } => {
             logic::set_model(&mut store, name);
             persist::save(&cli.store, &store)?;
+        }
+        Command::Advise {
+            model,
+            ollama_url,
+            ollama_timeout,
+        } => {
+            let resolved_model = logic::resolve_model(&store, model)?;
+            let transport = OllamaHttpTransport {
+                base_url: ollama_url,
+                model: resolved_model.clone(),
+                timeout_secs: ollama_timeout,
+            };
+            let report = logic::advise(&mut store, &transport, Some(resolved_model))?;
+            persist::save(&cli.store, &store)?;
+            println!(
+                "enqueued {}, dropped_known {}, dropped_cycle {}",
+                report.enqueued, report.dropped_known, report.dropped_cycle
+            );
         }
         Command::Replan(args) => {
             let now = Utc::now();
