@@ -616,6 +616,52 @@ mod stub_tests {
         }
     }
 
+    #[test]
+    fn event_signatures_are_canonical_and_distinguish_every_sent_field() {
+        let base = event();
+        let signature = event_signature(&base);
+        assert_eq!(signature, event_signature(&base.clone()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&signature).unwrap(),
+            serde_json::json!({
+                "summary": "test",
+                "start": "1970-01-01T00:00:00+00:00",
+                "end": "1970-01-01T00:01:00+00:00",
+                "color_id": null,
+                "transparent": false,
+                "reminders": [],
+            })
+        );
+
+        let mut variants = Vec::new();
+        let mut changed = base.clone();
+        changed.summary = "quotes \" and \\ and newline\n".into();
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.start += Duration::nanoseconds(1);
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.end += Duration::nanoseconds(1);
+        variants.push(changed);
+        for color in ["", "3"] {
+            let mut changed = base.clone();
+            changed.color_id = Some(color.into());
+            variants.push(changed);
+        }
+        let mut changed = base.clone();
+        changed.transparent = true;
+        variants.push(changed);
+        for reminders in [vec![0], vec![10, 0], vec![0, 10]] {
+            let mut changed = base.clone();
+            changed.reminders = reminders;
+            variants.push(changed);
+        }
+        let mut signatures = std::collections::BTreeSet::from([signature]);
+        for variant in variants {
+            assert!(signatures.insert(event_signature(&variant)));
+        }
+    }
+
     #[tokio::test]
     async fn stub_transport_records_calls_and_injects_errors() {
         let create_stub = StubTransport::with_create_error("create failed");
@@ -964,10 +1010,17 @@ mod stub_tests {
         assert!(calls.iter().all(|call| matches!(call, StubCall::Create(_))));
         assert_eq!(call_event(&calls[0]).summary, "Second");
         assert_eq!(call_event(&calls[1]).summary, "First");
+        assert_eq!(
+            store.export_signatures,
+            BTreeMap::from([
+                (id(2), event_signature(call_event(&calls[0]))),
+                (id(1), event_signature(call_event(&calls[1]))),
+            ])
+        );
     }
 
     #[tokio::test]
-    async fn second_export_updates_every_existing_event_without_creating() {
+    async fn second_export_skips_every_unchanged_event_without_transport_calls() {
         let mut store = Store::new();
         store.upsert_task(task(1, "First", Tier::UserShared, false, None));
         store.upsert_task(task(2, "Second", Tier::UserShared, false, None));
@@ -983,6 +1036,7 @@ mod stub_tests {
         .await
         .unwrap();
         transport.calls.borrow_mut().clear();
+        let before = store.clone();
 
         let report = export_plan(
             &mut store,
@@ -998,18 +1052,226 @@ mod stub_tests {
             report,
             ExportReport {
                 created: 0,
-                updated: 2,
-                skipped: 0,
+                updated: 0,
+                skipped: 2,
+            }
+        );
+        assert!(transport.calls.borrow().is_empty());
+        assert_eq!(store, before);
+    }
+
+    #[tokio::test]
+    async fn retitling_one_task_updates_only_its_event() {
+        let mut store = Store::new();
+        store.upsert_task(task(1, "First", Tier::UserShared, false, None));
+        store.upsert_task(task(2, "Second", Tier::UserShared, false, None));
+        let plan = plan(&[1, 2]);
+        let transport = StubTransport::default();
+        let colors = BTreeMap::new();
+        export_plan(&mut store, &plan, &transport, &colors, Tier::UserShared)
+            .await
+            .unwrap();
+        let old_signatures = store.export_signatures.clone();
+        transport.calls.borrow_mut().clear();
+        store.tasks.get_mut(&id(1)).unwrap().title = "Renamed".into();
+
+        let report = export_plan(&mut store, &plan, &transport, &colors, Tier::UserShared)
+            .await
+            .unwrap();
+        assert_eq!(
+            report,
+            ExportReport {
+                created: 0,
+                updated: 1,
+                skipped: 1
             }
         );
         let calls = transport.calls.borrow();
         assert!(matches!(
             calls.as_slice(),
-            [
-                StubCall::Update { event_id: first, .. },
-                StubCall::Update { event_id: second, .. }
-            ] if first == "event-1" && second == "event-2"
+            [StubCall::Update { event_id, event }]
+                if event_id == "event-1" && event.summary == "Renamed"
         ));
+        assert_eq!(
+            store.export_signatures[&id(1)],
+            event_signature(call_event(&calls[0]))
+        );
+        assert_ne!(store.export_signatures[&id(1)], old_signatures[&id(1)]);
+        assert_eq!(store.export_signatures[&id(2)], old_signatures[&id(2)]);
+    }
+
+    #[tokio::test]
+    async fn missing_link_creates_an_event_even_with_a_matching_cached_signature() {
+        let mut store = Store::new();
+        store.upsert_task(task(1, "First", Tier::UserShared, false, None));
+        let plan = plan(&[1]);
+        let transport = StubTransport::default();
+        let colors = BTreeMap::new();
+        export_plan(&mut store, &plan, &transport, &colors, Tier::UserShared)
+            .await
+            .unwrap();
+        store.calendar_links.remove(&id(1));
+        transport.calls.borrow_mut().clear();
+
+        let report = export_plan(&mut store, &plan, &transport, &colors, Tier::UserShared)
+            .await
+            .unwrap();
+        assert_eq!(
+            report,
+            ExportReport {
+                created: 1,
+                updated: 0,
+                skipped: 0
+            }
+        );
+        let calls = transport.calls.borrow();
+        assert!(matches!(calls.as_slice(), [StubCall::Create(_)]));
+        assert_eq!(
+            store.calendar_link(id(1)).map(String::as_str),
+            Some("event-2")
+        );
+        assert_eq!(
+            store.export_signatures[&id(1)],
+            event_signature(call_event(&calls[0]))
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_links_without_signatures_update_once_then_skip_after_reload() {
+        let mut store = Store::new();
+        store.upsert_task(task(1, "First", Tier::UserShared, false, None));
+        store.upsert_task(task(2, "Second", Tier::UserShared, false, None));
+        store.upsert_calendar_link(id(1), "legacy-1".into());
+        store.upsert_calendar_link(id(2), "legacy-2".into());
+        let mut legacy = serde_json::to_value(&store).unwrap();
+        legacy.as_object_mut().unwrap().remove("export_signatures");
+        let mut store: Store =
+            serde_json::from_str(&serde_json::to_string(&legacy).unwrap()).unwrap();
+        assert!(store.export_signatures.is_empty());
+        let plan = plan(&[1, 2]);
+        let transport = StubTransport::default();
+        let colors = BTreeMap::new();
+
+        let first = export_plan(&mut store, &plan, &transport, &colors, Tier::UserShared)
+            .await
+            .unwrap();
+        assert_eq!(
+            first,
+            ExportReport {
+                created: 0,
+                updated: 2,
+                skipped: 0
+            }
+        );
+        assert!(matches!(
+            transport.calls.borrow().as_slice(),
+            [StubCall::Update { event_id: first, .. }, StubCall::Update { event_id: second, .. }]
+                if first == "legacy-1" && second == "legacy-2"
+        ));
+        assert_eq!(store.export_signatures.len(), 2);
+        let reloaded: Store =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        assert_eq!(reloaded, store);
+        store = reloaded;
+        transport.calls.borrow_mut().clear();
+
+        let second = export_plan(&mut store, &plan, &transport, &colors, Tier::UserShared)
+            .await
+            .unwrap();
+        assert_eq!(
+            second,
+            ExportReport {
+                created: 0,
+                updated: 0,
+                skipped: 2
+            }
+        );
+        assert!(transport.calls.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_transport_calls_do_not_cache_unsent_events_and_can_be_retried() {
+        let mut store = Store::new();
+        store.upsert_task(task(1, "First", Tier::UserShared, false, None));
+        let plan = plan(&[1]);
+        let colors = BTreeMap::new();
+        let before = store.clone();
+        let failed_create = StubTransport::with_create_error("create failed");
+        assert_eq!(
+            export_plan(&mut store, &plan, &failed_create, &colors, Tier::UserShared).await,
+            Err("create failed".into())
+        );
+        assert_eq!(store, before);
+        assert!(matches!(
+            failed_create.calls.borrow().as_slice(),
+            [StubCall::Create(_)]
+        ));
+
+        let transport = StubTransport::default();
+        export_plan(&mut store, &plan, &transport, &colors, Tier::UserShared)
+            .await
+            .unwrap();
+        store.tasks.get_mut(&id(1)).unwrap().title = "Renamed".into();
+        let before = store.clone();
+        let failed_update = StubTransport::with_update_error("update failed");
+        assert_eq!(
+            export_plan(&mut store, &plan, &failed_update, &colors, Tier::UserShared).await,
+            Err("update failed".into())
+        );
+        assert_eq!(store, before);
+        assert!(matches!(
+            failed_update.calls.borrow().as_slice(),
+            [StubCall::Update { .. }]
+        ));
+        transport.calls.borrow_mut().clear();
+
+        let retry = export_plan(&mut store, &plan, &transport, &colors, Tier::UserShared)
+            .await
+            .unwrap();
+        assert_eq!(
+            retry,
+            ExportReport {
+                created: 0,
+                updated: 1,
+                skipped: 0
+            }
+        );
+        assert!(matches!(
+            transport.calls.borrow().as_slice(),
+            [StubCall::Update { .. }]
+        ));
+        assert_ne!(store.export_signatures, before.export_signatures);
+    }
+
+    #[tokio::test]
+    async fn edits_to_redacted_or_unsent_task_fields_do_not_trigger_updates() {
+        let mut store = Store::new();
+        store.upsert_task(task(1, "Secret", Tier::TopSecret, true, None));
+        let plan = plan(&[1]);
+        let transport = StubTransport::default();
+        let colors = default_category_colors();
+        export_plan(&mut store, &plan, &transport, &colors, Tier::UserShared)
+            .await
+            .unwrap();
+        transport.calls.borrow_mut().clear();
+        let secret = store.tasks.get_mut(&id(1)).unwrap();
+        secret.title = "New secret".into();
+        secret.category = Some("personal".into());
+        secret.detail = Some("New detail".into());
+
+        let report = export_plan(&mut store, &plan, &transport, &colors, Tier::UserShared)
+            .await
+            .unwrap();
+        assert_eq!(
+            report,
+            ExportReport {
+                created: 0,
+                updated: 0,
+                skipped: 1
+            }
+        );
+        assert!(transport.calls.borrow().is_empty());
+        assert!(!store.export_signatures[&id(1)].contains("secret"));
     }
 
     #[tokio::test]
