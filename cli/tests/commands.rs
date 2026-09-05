@@ -29,6 +29,32 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
+fn set_model_command_persists_and_replaces_the_model() {
+    let (directory, store_path) = temp_store();
+    for model in ["first-model", "replacement-model"] {
+        assert_success(&quick_ubu(&store_path, &["set-model", model]));
+        let store: Store = serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
+        assert_eq!(store.ollama_model.as_deref(), Some(model));
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn advise_and_ollama_replan_without_model_fail_before_http_or_save() {
+    let (_, store_path) = temp_store();
+    // There is no configured model, so neither command can reach the transport.
+    for arguments in [vec!["advise"], vec!["replan", "--planner", "ollama"]] {
+        let output = quick_ubu(&store_path, &arguments);
+        assert!(!output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "quick-ubu: no ollama model set; run: quick-ubu set-model <name>\n"
+        );
+        assert!(!store_path.exists());
+    }
+}
+
+#[test]
 fn add_pin_persists_a_scheduled_pinned_task() {
     let (directory, store_path) = temp_store();
     let output = quick_ubu(

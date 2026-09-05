@@ -1,11 +1,14 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
 
 use chrono::{DateTime, Duration, Utc};
+use ollama_planner::LlmTransport;
+use serde_json::{json, Value};
 use ubu_core::{
     next_task, re_plan, resolve_preferences, topo_order, AffectBudget, Bundle, ComputeTarget,
     CoreError, DecisionRecord, DecisionSource, DeferPolicy, DeterministicPlacer, Id, Objective,
-    ObjectiveStatus, PendingDecision, Planner, Preference, Proposal, Provenance, Relation,
-    Resolution, Store, Task, TaskStatus, Tier, TimeWindow,
+    ObjectiveStatus, PendingDecision, Planner, PrefSuggestion, Preference, Proposal, Provenance,
+    Relation, Resolution, Store, Task, TaskStatus, Tier, TimeWindow,
 };
 use uuid::Uuid;
 
@@ -76,6 +79,235 @@ pub enum Answer {
     Skip,
     Confirm,
     Reject,
+}
+
+pub fn set_model(store: &mut Store, name: String) {
+    store.ollama_model = Some(name);
+}
+
+pub fn resolve_model(store: &Store, model_override: Option<String>) -> Result<String, String> {
+    model_override
+        .or_else(|| store.ollama_model.clone())
+        .ok_or_else(|| "no ollama model set; run: quick-ubu set-model <name>".to_string())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Proposed {
+    pub deps: Vec<(Id, Id)>,
+    pub prefs: Vec<(Id, Id, PrefSuggestion)>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AdviseReport {
+    pub enqueued: usize,
+    pub dropped_known: usize,
+    pub dropped_cycle: usize,
+}
+
+pub fn build_advisor_prompt(store: &Store) -> (String, Vec<Id>) {
+    let index_map: Vec<_> = store
+        .tasks
+        .values()
+        .filter(|task| {
+            matches!(task.status, TaskStatus::Backlog | TaskStatus::Scheduled)
+                && task.pinned.is_none()
+        })
+        .map(|task| task.id)
+        .collect();
+    let indices: BTreeMap<_, _> = index_map
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index + 1))
+        .collect();
+    let mut prompt = String::from("Propose dependency and preference additions for these tasks:\n");
+    for (index, id) in index_map.iter().enumerate() {
+        writeln!(prompt, "[{}] {}", index + 1, store.tasks[id].title)
+            .expect("writing to a String cannot fail");
+    }
+    // Only relations with both endpoints listed can be expressed in index terms.
+    let mut dependencies = Vec::new();
+    for id in &index_map {
+        for blocker in &store.tasks[id].blocked_by {
+            if let Some(blocker_index) = indices.get(blocker) {
+                dependencies.push(json!({"blocked": indices[id], "blocker": blocker_index}));
+            }
+        }
+    }
+    let mut preferences = Vec::new();
+    for preference in &store.preferences {
+        let (Some(a), Some(b)) = (
+            singleton_task_for_bundle(store, preference.left),
+            singleton_task_for_bundle(store, preference.right),
+        ) else {
+            continue;
+        };
+        if let (Some(a), Some(b)) = (indices.get(&a), indices.get(&b)) {
+            let relation = match preference.relation {
+                Relation::Strict => "a_strict_b",
+                Relation::Indifferent => "indifferent",
+            };
+            preferences.push(json!({"a": a, "b": b, "relation": relation}));
+        }
+    }
+    writeln!(
+        prompt,
+        "Existing relations: {}",
+        json!({"dependencies": dependencies, "preferences": preferences})
+    )
+    .expect("writing to a String cannot fail");
+    prompt.push_str(
+        "Return ONLY additions as JSON: {\"dependencies\":[{\"blocked\":N,\"blocker\":M}],\"preferences\":[{\"a\":N,\"b\":M,\"relation\":\"a_strict_b|b_strict_a|indifferent\"}]}. Choose one of the three relation strings for each preference. Use only listed indices (starting at 1); do not repeat existing relations; do not create cycles; output only the JSON object. Use empty arrays when there are no additions.",
+    );
+    (prompt, index_map)
+}
+
+pub fn parse_proposals(text: &str, index_map: &[Id]) -> Result<Proposed, String> {
+    let value: Value =
+        serde_json::from_str(text).map_err(|error| format!("invalid advisor JSON: {error}"))?;
+    let array = |key: &str| {
+        value[key]
+            .as_array()
+            .ok_or_else(|| format!("advisor {key} must be an array"))
+    };
+    let task_id = |entry: &Value, key: &str| {
+        entry[key]
+            .as_u64()
+            .and_then(|index| index.checked_sub(1))
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| index_map.get(index).copied())
+            .ok_or_else(|| format!("advisor {key} index must be in 1..={}", index_map.len()))
+    };
+    let mut proposed = Proposed::default();
+    for entry in array("dependencies")? {
+        proposed
+            .deps
+            .push((task_id(entry, "blocked")?, task_id(entry, "blocker")?));
+    }
+    for entry in array("preferences")? {
+        let relation = match entry["relation"].as_str() {
+            Some("a_strict_b") => PrefSuggestion::AStrictB,
+            Some("b_strict_a") => PrefSuggestion::BStrictA,
+            Some("indifferent") => PrefSuggestion::Indifferent,
+            _ => return Err("invalid advisor preference relation".to_string()),
+        };
+        proposed
+            .prefs
+            .push((task_id(entry, "a")?, task_id(entry, "b")?, relation));
+    }
+    Ok(proposed)
+}
+
+fn advisor_pair(proposal: &Proposal) -> (Id, Id) {
+    match proposal {
+        Proposal::Dependency { blocked, blocker } => ordered_pair(*blocked, *blocker),
+        Proposal::Preference { a, b, .. } => ordered_pair(*a, *b),
+    }
+}
+
+pub fn filter_and_enqueue(store: &mut Store, proposed: Proposed) -> AdviseReport {
+    let mut known = BTreeSet::new();
+    for task in store.tasks.values() {
+        known.extend(
+            task.blocked_by
+                .iter()
+                .map(|blocker| ordered_pair(task.id, *blocker)),
+        );
+    }
+    for preference in &store.preferences {
+        if let (Some(a), Some(b)) = (
+            singleton_task_for_bundle(store, preference.left),
+            singleton_task_for_bundle(store, preference.right),
+        ) {
+            known.insert(ordered_pair(a, b));
+        }
+    }
+    known.extend(
+        store
+            .decision_history
+            .iter()
+            .map(|record| advisor_pair(&record.proposal)),
+    );
+    known.extend(
+        store
+            .pending_decisions
+            .iter()
+            .map(|decision| advisor_pair(&decision.proposal)),
+    );
+
+    let mut validation = store.clone();
+    let mut report = AdviseReport::default();
+    // The response has two ordered arrays: dependencies first, then preferences.
+    let proposals = proposed
+        .deps
+        .into_iter()
+        .map(|(blocked, blocker)| Proposal::Dependency { blocked, blocker })
+        .chain(
+            proposed
+                .prefs
+                .into_iter()
+                .map(|(a, b, suggested)| Proposal::Preference {
+                    a,
+                    b,
+                    suggested: Some(suggested),
+                }),
+        );
+    for proposal in proposals {
+        let pair = advisor_pair(&proposal);
+        if known.contains(&pair) {
+            report.dropped_known += 1;
+            continue;
+        }
+        let result = match &proposal {
+            Proposal::Dependency { blocked, blocker } => {
+                dep_add_ids(&mut validation, *blocked, *blocker)
+            }
+            Proposal::Preference {
+                a,
+                b,
+                suggested: Some(PrefSuggestion::AStrictB),
+            } => pref_add_ids(&mut validation, *a, *b, false),
+            Proposal::Preference {
+                a,
+                b,
+                suggested: Some(PrefSuggestion::BStrictA),
+            } => pref_add_ids(&mut validation, *b, *a, false),
+            Proposal::Preference {
+                a,
+                b,
+                suggested: Some(PrefSuggestion::Indifferent),
+            } => pref_add_ids(&mut validation, *a, *b, true),
+            Proposal::Preference {
+                suggested: None, ..
+            } => unreachable!("advisor always suggests a relation"),
+        };
+        if result.is_err() {
+            // The specified report has only one validation-failure bucket; this
+            // also includes self-relations and errors from an invalid input store.
+            report.dropped_cycle += 1;
+            continue;
+        }
+        known.insert(pair);
+        store.pending_decisions.push(PendingDecision {
+            id: Uuid::new_v4(),
+            source: DecisionSource::Advisor,
+            proposal,
+        });
+        report.enqueued += 1;
+    }
+    report
+}
+
+pub fn advise(
+    store: &mut Store,
+    transport: &dyn LlmTransport,
+    model_override: Option<String>,
+) -> Result<AdviseReport, String> {
+    // LlmTransport accepts only a prompt; the caller configures its model.
+    resolve_model(store, model_override)?;
+    let (prompt, index_map) = build_advisor_prompt(store);
+    let text = transport.generate(&prompt)?;
+    let proposed = parse_proposals(&text, &index_map)?;
+    Ok(filter_and_enqueue(store, proposed))
 }
 
 pub fn parse_tier(value: &str) -> Result<Tier, String> {
@@ -684,9 +916,516 @@ fn task_transparent(store: &Store, id: Id) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use chrono::TimeZone;
 
     use super::*;
+
+    struct StubTransport {
+        response: Result<String, String>,
+        prompts: RefCell<Vec<String>>,
+    }
+
+    impl StubTransport {
+        fn returning(response: Result<String, String>) -> Self {
+            Self {
+                response,
+                prompts: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl LlmTransport for StubTransport {
+        fn generate(&self, prompt: &str) -> Result<String, String> {
+            self.prompts.borrow_mut().push(prompt.to_string());
+            self.response.clone()
+        }
+    }
+
+    #[test]
+    fn resolve_model_uses_override_then_persisted_model_or_clear_error() {
+        let mut store = Store::new();
+        assert_eq!(
+            resolve_model(&store, None),
+            Err("no ollama model set; run: quick-ubu set-model <name>".to_string())
+        );
+        assert_eq!(
+            resolve_model(&store, Some("override".into())),
+            Ok("override".into())
+        );
+        set_model(&mut store, "saved".into());
+        assert_eq!(resolve_model(&store, None), Ok("saved".into()));
+        assert_eq!(
+            resolve_model(&store, Some("override".into())),
+            Ok("override".into())
+        );
+        assert_eq!(store.ollama_model.as_deref(), Some("saved"));
+    }
+
+    #[test]
+    fn set_model_persists_through_save_and_load() {
+        let mut store = graph_store();
+        set_model(&mut store, "saved-model".into());
+        let directory = std::env::temp_dir().join(format!("quick-ubu-model-{}", Uuid::new_v4()));
+        let path = directory.join("store.json");
+        crate::persist::save(&path, &store).unwrap();
+        assert_eq!(crate::persist::load(&path).unwrap(), store);
+        set_model(&mut store, "replacement".into());
+        crate::persist::save(&path, &store).unwrap();
+        assert_eq!(
+            resolve_model(&crate::persist::load(&path).unwrap(), None),
+            Ok("replacement".into())
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn store_without_ollama_model_loads_as_none() {
+        let store = graph_store();
+        let mut value = serde_json::to_value(&store).unwrap();
+        value.as_object_mut().unwrap().remove("ollama_model");
+        let loaded: Store = serde_json::from_str(&value.to_string()).unwrap();
+        assert_eq!(loaded.ollama_model, None);
+        assert_eq!(loaded, store);
+    }
+
+    #[test]
+    fn advisor_prompt_lists_active_dynamic_indices_and_existing_relations() {
+        let (a, b, c) = graph_ids();
+        let mut store = graph_store();
+        store.tasks.get_mut(&b).unwrap().status = TaskStatus::Scheduled;
+        for (index, status) in [TaskStatus::Active, TaskStatus::Done, TaskStatus::Deferred]
+            .into_iter()
+            .enumerate()
+        {
+            let mut task = graph_task(id(index as u128 + 1), "Excluded inactive");
+            task.status = status;
+            store.upsert_task(task);
+        }
+        let mut pinned = graph_task(id(4), "Excluded pinned");
+        pinned.pinned = Some(TimeWindow {
+            start: fixed_time(),
+            end: fixed_time() + Duration::minutes(30),
+        });
+        store.upsert_task(pinned);
+        dep_add_ids(&mut store, a, b).unwrap();
+        dep_add_ids(&mut store, a, id(4)).unwrap();
+        pref_add_ids(&mut store, b, c, false).unwrap();
+        pref_add_ids(&mut store, a, b, true).unwrap();
+
+        let (prompt, map) = build_advisor_prompt(&store);
+        assert_eq!(map, vec![a, b, c]);
+        for label in ["[1] Alpha", "[2] Bravo", "[3] Charlie"] {
+            assert!(prompt.contains(label));
+        }
+        assert!(!prompt.contains("Excluded"));
+        let existing = prompt
+            .lines()
+            .find_map(|line| line.strip_prefix("Existing relations: "))
+            .unwrap();
+        let existing: Value = serde_json::from_str(existing).unwrap();
+        assert_eq!(
+            existing,
+            json!({
+                "dependencies": [{"blocked": 1, "blocker": 2}],
+                "preferences": [
+                    {"a": 2, "b": 3, "relation": "a_strict_b"},
+                    {"a": 1, "b": 2, "relation": "indifferent"}
+                ]
+            })
+        );
+        for instruction in [
+            "Use only listed indices",
+            "do not repeat existing relations",
+            "do not create cycles",
+            "output only the JSON object",
+        ] {
+            assert!(prompt.contains(instruction));
+        }
+        assert_eq!(build_advisor_prompt(&store), (prompt, map));
+    }
+
+    #[test]
+    fn parse_proposals_maps_indices_and_all_preference_relations() {
+        let (a, b, c) = graph_ids();
+        let text = json!({
+            "dependencies": [{"blocked": 3, "blocker": 1}],
+            "preferences": [
+                {"a": 1, "b": 2, "relation": "a_strict_b"},
+                {"a": 2, "b": 3, "relation": "b_strict_a"},
+                {"a": 3, "b": 1, "relation": "indifferent"}
+            ]
+        })
+        .to_string();
+        assert_eq!(
+            parse_proposals(&text, &[a, b, c]),
+            Ok(Proposed {
+                deps: vec![(c, a)],
+                prefs: vec![
+                    (a, b, PrefSuggestion::AStrictB),
+                    (b, c, PrefSuggestion::BStrictA),
+                    (c, a, PrefSuggestion::Indifferent)
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_proposals_rejects_invalid_indices_in_every_endpoint() {
+        for invalid in [
+            json!(0),
+            json!(4),
+            json!(-1),
+            json!(1.5),
+            json!("1"),
+            Value::Null,
+            json!(u64::MAX),
+        ] {
+            for (array, field) in [
+                ("dependencies", "blocked"),
+                ("dependencies", "blocker"),
+                ("preferences", "a"),
+                ("preferences", "b"),
+            ] {
+                let mut value = json!({
+                    "dependencies": [{"blocked": 1, "blocker": 2}],
+                    "preferences": [{"a": 2, "b": 3, "relation": "indifferent"}]
+                });
+                value[array][0][field] = invalid.clone();
+                assert!(parse_proposals(&value.to_string(), &[id(1), id(2), id(3)]).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn parse_proposals_rejects_bad_json_schema_and_relation() {
+        for text in [
+            "not json",
+            "null",
+            "[]",
+            "{}",
+            r#"{"dependencies":[],"preferences":null}"#,
+            r#"{"dependencies":[],"preferences":[{"a":1,"b":2,"relation":"unknown"}]}"#,
+        ] {
+            assert!(parse_proposals(text, &[id(1), id(2)]).is_err());
+        }
+        assert_eq!(
+            parse_proposals(r#"{"dependencies":[],"preferences":[]}"#, &[]),
+            Ok(Proposed::default())
+        );
+    }
+
+    #[test]
+    fn advisor_enqueues_novel_proposals_with_suggestions_without_graph_changes() {
+        let (a, b, c) = graph_ids();
+        for suggestion in [
+            PrefSuggestion::AStrictB,
+            PrefSuggestion::BStrictA,
+            PrefSuggestion::Indifferent,
+        ] {
+            let mut store = graph_store();
+            let before = store.clone();
+            let report = filter_and_enqueue(
+                &mut store,
+                Proposed {
+                    deps: vec![(a, b)],
+                    prefs: vec![(b, c, suggestion.clone())],
+                },
+            );
+            assert_eq!(
+                report,
+                AdviseReport {
+                    enqueued: 2,
+                    ..AdviseReport::default()
+                }
+            );
+            assert!(store
+                .pending_decisions
+                .iter()
+                .all(|d| d.source == DecisionSource::Advisor));
+            assert_ne!(store.pending_decisions[0].id, store.pending_decisions[1].id);
+            assert_eq!(
+                store.pending_decisions[0].proposal,
+                Proposal::Dependency {
+                    blocked: a,
+                    blocker: b
+                }
+            );
+            assert_eq!(
+                store.pending_decisions[1].proposal,
+                Proposal::Preference {
+                    a: b,
+                    b: c,
+                    suggested: Some(suggestion)
+                }
+            );
+            store.pending_decisions.clear();
+            assert_eq!(store, before);
+        }
+    }
+
+    #[test]
+    fn advisor_deduplicates_related_history_and_pending_pairs_across_kinds() {
+        let (a, b, _) = graph_ids();
+        for kind in 0..6 {
+            let mut store = graph_store();
+            match kind {
+                0 => dep_add_ids(&mut store, a, b).unwrap(),
+                1 => pref_add_ids(&mut store, a, b, false).unwrap(),
+                2 | 3 => store.decision_history.push(DecisionRecord {
+                    proposal: if kind == 2 {
+                        Proposal::Dependency {
+                            blocked: a,
+                            blocker: b,
+                        }
+                    } else {
+                        Proposal::Preference {
+                            a,
+                            b,
+                            suggested: None,
+                        }
+                    },
+                    resolution: Resolution::Skipped,
+                    at: fixed_time(),
+                }),
+                4 => store
+                    .pending_decisions
+                    .push(dependency_decision(id(20), a, b)),
+                5 => store
+                    .pending_decisions
+                    .push(preference_decision(id(20), a, b)),
+                _ => unreachable!(),
+            }
+            let before = store.clone();
+            let report = filter_and_enqueue(
+                &mut store,
+                Proposed {
+                    deps: vec![(b, a)],
+                    prefs: vec![(b, a, PrefSuggestion::Indifferent)],
+                },
+            );
+            assert_eq!(
+                report,
+                AdviseReport {
+                    dropped_known: 2,
+                    ..AdviseReport::default()
+                }
+            );
+            assert_eq!(store, before);
+        }
+    }
+
+    #[test]
+    fn advisor_deduplicates_within_batch_and_on_rerun() {
+        let (a, b, _) = graph_ids();
+        let mut store = graph_store();
+        let proposed = || Proposed {
+            deps: vec![(a, b), (b, a)],
+            prefs: vec![(a, b, PrefSuggestion::AStrictB)],
+        };
+        assert_eq!(
+            filter_and_enqueue(&mut store, proposed()),
+            AdviseReport {
+                enqueued: 1,
+                dropped_known: 2,
+                dropped_cycle: 0,
+            }
+        );
+        let before = store.clone();
+        assert_eq!(
+            filter_and_enqueue(&mut store, proposed()),
+            AdviseReport {
+                dropped_known: 3,
+                ..AdviseReport::default()
+            }
+        );
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn advisor_drops_dependency_cycles_against_existing_and_accumulated_edges() {
+        let (a, b, c) = graph_ids();
+        for existing in [false, true] {
+            let mut store = graph_store();
+            if existing {
+                dep_add_ids(&mut store, a, b).unwrap();
+            }
+            let before = store.clone();
+            let deps = if existing {
+                vec![(b, c), (c, a)]
+            } else {
+                vec![(a, b), (b, c), (c, a)]
+            };
+            assert_eq!(
+                filter_and_enqueue(
+                    &mut store,
+                    Proposed {
+                        deps,
+                        prefs: vec![]
+                    }
+                ),
+                AdviseReport {
+                    enqueued: if existing { 1 } else { 2 },
+                    dropped_known: 0,
+                    dropped_cycle: 1,
+                }
+            );
+            assert!(!store.pending_decisions.iter().any(|d| d.proposal
+                == Proposal::Dependency {
+                    blocked: c,
+                    blocker: a
+                }));
+            store.pending_decisions.clear();
+            assert_eq!(store, before);
+        }
+    }
+
+    #[test]
+    fn advisor_drops_preference_cycles_and_keeps_validating_after_rejection() {
+        let (a, b, c) = graph_ids();
+        for existing in [false, true] {
+            let mut store = graph_store();
+            if existing {
+                pref_add_ids(&mut store, a, b, false).unwrap();
+            }
+            let before = store.clone();
+            let mut prefs = Vec::new();
+            if !existing {
+                prefs.push((a, b, PrefSuggestion::AStrictB));
+            }
+            prefs.extend([
+                (b, c, PrefSuggestion::Indifferent),
+                (a, c, PrefSuggestion::BStrictA), // c > a closes a > b ~ c.
+                (a, c, PrefSuggestion::AStrictB), // a > c still applies after rejection.
+            ]);
+            assert_eq!(
+                filter_and_enqueue(
+                    &mut store,
+                    Proposed {
+                        deps: vec![],
+                        prefs
+                    }
+                ),
+                AdviseReport {
+                    enqueued: if existing { 2 } else { 3 },
+                    dropped_known: 0,
+                    dropped_cycle: 1,
+                }
+            );
+            assert_eq!(
+                store.pending_decisions.last().unwrap().proposal,
+                Proposal::Preference {
+                    a,
+                    b: c,
+                    suggested: Some(PrefSuggestion::AStrictB)
+                }
+            );
+            store.pending_decisions.clear();
+            assert_eq!(store, before);
+        }
+    }
+
+    #[test]
+    fn advisor_rejects_self_relations_without_changing_store() {
+        let (a, _, _) = graph_ids();
+        let mut store = graph_store();
+        let before = store.clone();
+        assert_eq!(
+            filter_and_enqueue(
+                &mut store,
+                Proposed {
+                    deps: vec![(a, a)],
+                    prefs: vec![(a, a, PrefSuggestion::Indifferent)],
+                }
+            ),
+            AdviseReport {
+                dropped_cycle: 2,
+                ..AdviseReport::default()
+            }
+        );
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn advise_calls_stub_once_then_review_confirms_normally() {
+        let (a, b, c) = graph_ids();
+        let mut store = graph_store();
+        set_model(&mut store, "stub-model".into());
+        let before = store.clone();
+        let stub = StubTransport::returning(Ok(json!({
+            "dependencies": [{"blocked": 1, "blocker": 2}],
+            "preferences": [{"a": 2, "b": 3, "relation": "b_strict_a"}]
+        })
+        .to_string()));
+        assert_eq!(
+            advise(&mut store, &stub, None),
+            Ok(AdviseReport {
+                enqueued: 2,
+                ..AdviseReport::default()
+            })
+        );
+        assert_eq!(
+            *stub.prompts.borrow(),
+            vec![build_advisor_prompt(&before).0]
+        );
+        assert_eq!(store.tasks, before.tasks);
+        assert_eq!(store.bundles, before.bundles);
+        assert_eq!(store.preferences, before.preferences);
+        let dependency = store.pending_decisions[0].id;
+        let preference = store.pending_decisions[1].id;
+        assert_eq!(
+            resolve_decision(&mut store, dependency, Answer::Confirm),
+            Ok(Resolution::Confirmed)
+        );
+        assert_eq!(
+            resolve_decision(&mut store, preference, Answer::BStrictA),
+            Ok(Resolution::Confirmed)
+        );
+        assert_eq!(store.tasks[&a].blocked_by, vec![b]);
+        assert_eq!(
+            singleton_task_for_bundle(&store, store.preferences[0].left),
+            Some(c)
+        );
+        assert_eq!(
+            singleton_task_for_bundle(&store, store.preferences[0].right),
+            Some(b)
+        );
+        assert_eq!(store.preferences[0].relation, Relation::Strict);
+        assert!(store.pending_decisions.is_empty());
+        assert_eq!(store.decision_history.len(), 2);
+    }
+
+    #[test]
+    fn advise_errors_leave_store_unchanged_and_missing_model_never_calls_transport() {
+        let mut store = graph_store();
+        let before = store.clone();
+        let stub = StubTransport::returning(Ok("invalid JSON".into()));
+        assert_eq!(
+            advise(&mut store, &stub, None),
+            Err("no ollama model set; run: quick-ubu set-model <name>".into())
+        );
+        assert!(stub.prompts.borrow().is_empty());
+        assert_eq!(store, before);
+        for response in [Err("transport failed".into()), Ok("invalid JSON".into()), Ok(r#"{"dependencies":[{"blocked":1,"blocker":2}],"preferences":[{"a":2,"b":4,"relation":"indifferent"}]}"#.into())] {
+            let stub = StubTransport::returning(response);
+            assert!(advise(&mut store, &stub, Some("override".into())).is_err());
+            assert_eq!(stub.prompts.borrow().len(), 1);
+            assert_eq!(store, before);
+        }
+    }
+
+    #[test]
+    fn advise_empty_store_still_queries_once_with_override() {
+        let mut store = Store::new();
+        let stub = StubTransport::returning(Ok(r#"{"dependencies":[],"preferences":[]}"#.into()));
+        assert_eq!(
+            advise(&mut store, &stub, Some("override".into())),
+            Ok(AdviseReport::default())
+        );
+        assert_eq!(stub.prompts.borrow().len(), 1);
+        assert_eq!(store, Store::new());
+    }
 
     #[test]
     fn tier_parsing_accepts_all_kebab_names_and_rejects_garbage() {

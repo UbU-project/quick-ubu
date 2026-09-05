@@ -11,6 +11,8 @@ use crate::types::{Bundle, CoreError, Id, LogEntry, Objective, Preference, Task}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Store {
+    #[serde(default)]
+    pub ollama_model: Option<String>,
     pub objectives: BTreeMap<Id, Objective>,
     pub tasks: BTreeMap<Id, Task>,
     #[serde(default)]
