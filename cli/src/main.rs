@@ -668,3 +668,59 @@ fn transparency_marker(transparent: bool) -> &'static str {
         ""
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advisor_and_replan_parse_optional_model_and_transport_settings_without_http() {
+        let cli = Cli::try_parse_from(["quick-ubu", "advise"]).unwrap();
+        match cli.command {
+            Command::Advise {
+                model,
+                ollama_url,
+                ollama_timeout,
+            } => {
+                assert_eq!(model, None);
+                assert_eq!(ollama_url, "http://localhost:11434");
+                assert_eq!(ollama_timeout, 30);
+            }
+            _ => panic!("expected advise"),
+        }
+        let cli = Cli::try_parse_from([
+            "quick-ubu",
+            "advise",
+            "--model",
+            "override",
+            "--ollama-url",
+            "http://unused.invalid",
+            "--ollama-timeout",
+            "9",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Advise {
+                model,
+                ollama_url,
+                ollama_timeout,
+            } => {
+                assert_eq!(model.as_deref(), Some("override"));
+                assert_eq!(ollama_url, "http://unused.invalid");
+                assert_eq!(ollama_timeout, 9);
+            }
+            _ => panic!("expected advise"),
+        }
+        for model_args in [vec![], vec!["--model", "override"]] {
+            let mut args = vec!["quick-ubu", "replan", "--planner", "ollama"];
+            args.extend(model_args.iter().copied());
+            let cli = Cli::try_parse_from(args).unwrap();
+            match cli.command {
+                Command::Replan(args) => {
+                    assert_eq!(args.model.as_deref(), model_args.get(1).copied());
+                }
+                _ => panic!("expected replan"),
+            }
+        }
+    }
+}
