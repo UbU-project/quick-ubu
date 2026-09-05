@@ -351,6 +351,7 @@ impl CalendarTransport for GoogleCalendarTransport {
 pub struct ExportReport {
     pub created: usize,
     pub updated: usize,
+    pub skipped: usize,
 }
 
 pub async fn export_plan<T: CalendarTransport>(
@@ -363,6 +364,7 @@ pub async fn export_plan<T: CalendarTransport>(
     let mut report = ExportReport {
         created: 0,
         updated: 0,
+        skipped: 0,
     };
 
     for entry in &plan.entries {
@@ -390,14 +392,21 @@ pub async fn export_plan<T: CalendarTransport>(
             transparent: task.transparent,
             reminders: task.reminders.clone(),
         };
+        let sig = event_signature(&event);
         let existing_event_id = store.calendar_link(entry.item).cloned();
 
         if let Some(event_id) = existing_event_id {
+            if store.export_signatures.get(&entry.item) == Some(&sig) {
+                report.skipped += 1;
+                continue;
+            }
             transport.update_event(&event_id, &event).await?;
+            store.export_signatures.insert(entry.item, sig);
             report.updated += 1;
         } else {
             let event_id = transport.create_event(&event).await?;
             store.upsert_calendar_link(entry.item, event_id);
+            store.export_signatures.insert(entry.item, sig);
             report.created += 1;
         }
     }
@@ -731,7 +740,8 @@ mod stub_tests {
                 report,
                 ExportReport {
                     created: usize::from(index == 0),
-                    updated: usize::from(index > 0)
+                    updated: usize::from(index > 0),
+                    skipped: 0,
                 }
             );
             let calls = transport.calls.borrow();
@@ -937,6 +947,7 @@ mod stub_tests {
             ExportReport {
                 created: 2,
                 updated: 0,
+                skipped: 0,
             }
         );
         assert_eq!(store.calendar_links.len(), 2);
@@ -988,6 +999,7 @@ mod stub_tests {
             ExportReport {
                 created: 0,
                 updated: 2,
+                skipped: 0,
             }
         );
         let calls = transport.calls.borrow();
