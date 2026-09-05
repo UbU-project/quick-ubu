@@ -7,7 +7,10 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc, Weekday};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use gcal::{export_plan, import_from_calendar, CalendarTransport, GoogleCalendarTransport};
+use gcal::{
+    default_category_colors, export_plan, import_from_calendar, CalendarTransport,
+    GoogleCalendarTransport,
+};
 use ollama_planner::{OllamaHttpTransport, OllamaPlanner};
 use ubu_core::{
     generate_routine_tasks, re_plan, AffectBudget, ComputeTarget, DeterministicPlacer, Planner,
@@ -62,6 +65,10 @@ enum Command {
     Review,
     Prioritize,
     SetModel { name: String },
+    /// Persist a category's Google Calendar event colorId.
+    SetColor { category: String, color_id: String },
+    /// List category colors with persisted overrides applied.
+    ColorList,
     Advise {
         #[arg(long)]
         model: Option<String>,
@@ -302,6 +309,15 @@ fn run(cli: Cli) -> Result<(), String> {
             logic::set_model(&mut store, name);
             persist::save(&cli.store, &store)?;
         }
+        Command::SetColor { category, color_id } => {
+            store.set_category_color(category, color_id);
+            persist::save(&cli.store, &store)?;
+        }
+        Command::ColorList => {
+            for (category, color_id) in effective_color_map(&store, None)? {
+                println!("{category}  {color_id}");
+            }
+        }
         Command::Advise {
             model,
             ollama_url,
@@ -406,7 +422,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 &DeterministicPlacer,
             )
             .map_err(|error| format!("export planning failed: {error:?}"))?;
-            let color_map = load_color_map(args.color_config.as_deref())?;
+            let color_map = effective_color_map(&store, args.color_config.as_deref())?;
             let transport =
                 GoogleCalendarTransport::new(args.credentials, args.token_cache, args.calendar_id);
             let runtime = tokio::runtime::Runtime::new()
@@ -435,7 +451,8 @@ fn run(cli: Cli) -> Result<(), String> {
                 .map(logic::parse_datetime)
                 .transpose()?
                 .unwrap_or(now + Duration::days(7));
-            let color_to_category = load_color_map(args.color_config.as_deref())?
+            // Duplicate colors resolve to the alphabetically last category.
+            let color_to_category = effective_color_map(&store, args.color_config.as_deref())?
                 .into_iter()
                 .map(|(category, color_id)| (color_id, category))
                 .collect();
@@ -576,6 +593,16 @@ fn load_color_map(path: Option<&Path>) -> Result<BTreeMap<String, String>, Strin
         .map_err(|error| format!("failed to parse {}: {error}", path.display()))
 }
 
+fn effective_color_map(
+    store: &ubu_core::Store,
+    color_config: Option<&Path>,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut colors = default_category_colors();
+    colors.extend(store.category_colors.clone());
+    colors.extend(load_color_map(color_config)?);
+    Ok(colors)
+}
+
 fn print_replan(output: logic::ReplanOutput) {
     println!("Schedule:");
     for entry in output.schedule {
@@ -691,6 +718,119 @@ fn transparency_marker(transparent: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_colors_include_every_legacy_default() {
+        let colors = effective_color_map(&ubu_core::Store::new(), None).unwrap();
+        let expected = [
+            ("personal", "3"),
+            ("relationship", "5"),
+            ("business", "6"),
+            ("committed", "11"),
+            ("location", "8"),
+            ("entertainment", "1"),
+            ("grocery", "2"),
+            ("commute", "7"),
+            ("undefined", "4"),
+            ("education_house", "10"),
+            ("work", "9"),
+        ];
+        assert_eq!(colors.len(), expected.len());
+        for (category, color) in expected {
+            assert_eq!(colors[category], color);
+        }
+    }
+
+    #[test]
+    fn effective_colors_overlay_store_then_file_per_category() {
+        let mut store = ubu_core::Store::new();
+        store.set_category_color("personal".into(), "5".into());
+        store.set_category_color("custom".into(), "8".into());
+        let persisted = effective_color_map(&store, None).unwrap();
+        assert_eq!(persisted["personal"], "5");
+        assert_eq!(persisted["work"], "9");
+        assert_eq!(persisted["custom"], "8");
+
+        let path = std::env::temp_dir().join(format!("gc-4-colors-{}.json", uuid::Uuid::new_v4()));
+        fs::write(&path, r#"{"personal":"7","file_only":"2"}"#).unwrap();
+        let colors = effective_color_map(&store, Some(&path)).unwrap();
+        assert_eq!(colors["personal"], "7");
+        assert_eq!(colors["work"], "9");
+        assert_eq!(colors["custom"], "8");
+        assert_eq!(colors["file_only"], "2");
+        assert_eq!(store.category_colors["personal"], "5");
+
+        fs::write(&path, "invalid JSON").unwrap();
+        assert!(effective_color_map(&store, Some(&path))
+            .unwrap_err()
+            .contains("failed to parse"));
+        fs::remove_file(&path).unwrap();
+        assert!(effective_color_map(&store, Some(&path))
+            .unwrap_err()
+            .contains("failed to read"));
+    }
+
+    #[test]
+    fn legacy_store_without_category_colors_loads_empty_and_uses_defaults() {
+        let path = std::env::temp_dir().join(format!("gc-4-legacy-{}.json", uuid::Uuid::new_v4()));
+        fs::write(
+            &path,
+            r#"{"objectives":{},"tasks":{},"bundles":{},"preferences":[],"log":[]}"#,
+        )
+        .unwrap();
+        let mut store = persist::load(&path).unwrap();
+        assert!(store.category_colors.is_empty());
+        assert_eq!(
+            effective_color_map(&store, None).unwrap(),
+            default_category_colors()
+        );
+
+        store.set_category_color("personal".into(), "7".into());
+        persist::save(&path, &store).unwrap();
+        assert_eq!(
+            persist::load(&path).unwrap().category_colors["personal"],
+            "7"
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn import_captures_inverse_categories_from_effective_colors_without_http() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        let event = gcal::FetchedEvent {
+            id: "colored-event".into(),
+            summary: "Routine".into(),
+            color_id: Some("3".into()),
+            start: now,
+            end: now + Duration::minutes(30),
+            transparent: false,
+        };
+        let path = std::env::temp_dir().join(format!("gc-4-import-{}.json", uuid::Uuid::new_v4()));
+        fs::write(&path, r#"{"work":"9","relationship":"3"}"#).unwrap();
+        for (layer, expected) in [(0, "personal"), (1, "work"), (2, "relationship")] {
+            let mut store = ubu_core::Store::new();
+            if layer > 0 {
+                store.set_category_color("work".into(), "3".into());
+            }
+            let inverse = effective_color_map(&store, (layer == 2).then_some(path.as_path()))
+                .unwrap()
+                .into_iter()
+                .map(|(category, color)| (color, category))
+                .collect();
+            let report = import_from_calendar(
+                &mut store,
+                std::slice::from_ref(&event),
+                now,
+                Tier::UserShared,
+                &inverse,
+            );
+            assert_eq!(report.captured, 1);
+            let captured = store.tasks.values().next().unwrap();
+            assert_eq!(captured.category.as_deref(), Some(expected));
+            assert!(captured.pinned.is_some());
+        }
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn advisor_and_replan_parse_optional_model_and_transport_settings_without_http() {

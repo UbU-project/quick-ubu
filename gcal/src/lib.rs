@@ -15,6 +15,26 @@ const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar";
 const CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3/calendars";
 const CAPTURE_NAMESPACE: Id = Id::from_u128(0xfbb8_2411_158b_4a86_9f69_42d19fec7587);
 
+/// category -> Google event colorId, matching the operator's legacy scheme.
+pub fn default_category_colors() -> BTreeMap<String, String> {
+    [
+        ("personal", "3"),
+        ("relationship", "5"),
+        ("business", "6"),
+        ("committed", "11"),
+        ("location", "8"),
+        ("entertainment", "1"),
+        ("grocery", "2"),
+        ("commute", "7"),
+        ("undefined", "4"),
+        ("education_house", "10"),
+        ("work", "9"),
+    ]
+    .into_iter()
+    .map(|(category, color_id)| (category.to_string(), color_id.to_string()))
+    .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarEvent {
     pub summary: String,
@@ -841,6 +861,35 @@ mod stub_tests {
                 (linked_event_id == event_id).then_some(*task_id)
             })
             .expect("event is linked")
+    }
+
+    #[tokio::test]
+    async fn default_colors_color_pinned_personal_but_leave_dynamic_default() {
+        let mut store = Store::new();
+        store.upsert_task(task(1, "Routine", Tier::UserShared, true, Some("personal")));
+        store.upsert_task(task(
+            2,
+            "Dynamic",
+            Tier::UserShared,
+            false,
+            Some("personal"),
+        ));
+        let transport = StubTransport::default();
+
+        export_plan(
+            &mut store,
+            &plan(&[1, 2]),
+            &transport,
+            &default_category_colors(),
+            Tier::UserShared,
+        )
+        .await
+        .unwrap();
+
+        let calls = transport.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(call_event(&calls[0]).color_id.as_deref(), Some("3"));
+        assert_eq!(call_event(&calls[1]).color_id, None);
     }
 
     #[tokio::test]

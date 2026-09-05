@@ -29,6 +29,34 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
+fn set_color_persists_and_color_list_reflects_overrides() {
+    let (directory, store_path) = temp_store();
+    let defaults = quick_ubu(&store_path, &["color-list"]);
+    assert_success(&defaults);
+    let stdout = String::from_utf8(defaults.stdout).unwrap();
+    assert_eq!(stdout.lines().count(), 11);
+    assert!(stdout.lines().any(|line| line == "personal  3"));
+    assert!(!store_path.exists());
+
+    for color in ["5", "7"] {
+        assert_success(&quick_ubu(&store_path, &["set-color", "personal", color]));
+        let store: Store = serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
+        assert_eq!(store.category_colors.len(), 1);
+        assert_eq!(store.category_colors["personal"], color);
+
+        let output = quick_ubu(&store_path, &["color-list"]);
+        assert_success(&output);
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(stdout.lines().count(), 11);
+        assert!(stdout
+            .lines()
+            .any(|line| line == format!("personal  {color}")));
+        assert!(stdout.lines().any(|line| line == "work  9"));
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn add_repeatable_reminders_persist_and_appear_in_replan() {
     let (directory, store_path) = temp_store();
     assert_success(&quick_ubu(
