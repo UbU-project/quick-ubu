@@ -29,6 +29,118 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
+fn done_persists_completion_and_report_reads_it_without_mutating_store() {
+    let (directory, store_path) = temp_store();
+    let added = quick_ubu(
+        &store_path,
+        &[
+            "add",
+            "--title",
+            "Work",
+            "--duration",
+            "90",
+            "--category",
+            "work",
+        ],
+    );
+    assert_success(&added);
+    let task_id = String::from_utf8(added.stdout).unwrap();
+    let before = chrono::Utc::now();
+    assert_success(&quick_ubu(&store_path, &["done", task_id.trim()]));
+    let after = chrono::Utc::now();
+    let contents = fs::read_to_string(&store_path).unwrap();
+    let store: Store = serde_json::from_str(&contents).unwrap();
+    let id = Uuid::parse_str(task_id.trim()).unwrap();
+    assert_eq!(store.tasks[&id].status, TaskStatus::Done);
+    assert_eq!(store.log.len(), 1);
+    assert!(before <= store.log[0].at && store.log[0].at <= after);
+    assert_eq!(
+        store.log[0].kind,
+        ubu_core::LogEntryKind::Fact(ubu_core::FactKind::Actual {
+            item_id: id,
+            status: ubu_core::ActualStatus::Done,
+            actual: None,
+        })
+    );
+    let report = quick_ubu(&store_path, &["report"]);
+    assert_success(&report);
+    assert_eq!(
+        String::from_utf8(report.stdout).unwrap(),
+        "work   1h 30m\nTotal   1h 30m\n"
+    );
+    assert_eq!(fs::read_to_string(&store_path).unwrap(), contents);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn report_cli_clamps_transparent_pins_and_sorts_categories() {
+    let (directory, store_path) = temp_store();
+    for args in [
+        vec![
+            "add",
+            "--title",
+            "Personal",
+            "--duration",
+            "90",
+            "--pin",
+            "2026-08-31T23:30:00Z",
+            "--category",
+            "personal",
+            "--transparent",
+        ],
+        vec![
+            "add",
+            "--title",
+            "Work",
+            "--duration",
+            "120",
+            "--pin",
+            "2026-09-01T10:00:00Z",
+            "--category",
+            "work",
+        ],
+        vec![
+            "add",
+            "--title",
+            "Other",
+            "--duration",
+            "15",
+            "--pin",
+            "2026-09-01T12:00:00Z",
+        ],
+    ] {
+        assert_success(&quick_ubu(&store_path, &args));
+    }
+    let report = quick_ubu(
+        &store_path,
+        &["report", "--from", "2026-09-01", "--to", "2026-09-02"],
+    );
+    assert_success(&report);
+    assert_eq!(
+        String::from_utf8(report.stdout).unwrap(),
+        "work   2h 0m\npersonal   1h 0m\n(uncategorized)   0h 15m\nTotal   3h 15m\n"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn report_empty_store_and_invalid_windows_do_not_create_a_store() {
+    let (_directory, store_path) = temp_store();
+    let report = quick_ubu(&store_path, &["report", "--days", "14"]);
+    assert_success(&report);
+    assert_eq!(String::from_utf8(report.stdout).unwrap(), "Total   0h 0m\n");
+    for args in [
+        vec!["report", "--from", "2026-02-30"],
+        vec!["report", "--from", "2026-09-02", "--to", "2026-09-01"],
+    ] {
+        let report = quick_ubu(&store_path, &args);
+        assert!(!report.status.success());
+        assert!(!report.stderr.is_empty());
+    }
+    assert!(!store_path.exists());
+}
+
+#[test]
 fn set_color_persists_and_color_list_reflects_overrides() {
     let (directory, store_path) = temp_store();
     let defaults = quick_ubu(&store_path, &["color-list"]);

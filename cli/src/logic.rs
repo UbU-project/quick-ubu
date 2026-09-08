@@ -397,7 +397,12 @@ pub fn done(store: &mut Store, prefix: &str, now: DateTime<Utc>) -> Result<(), S
         .get_mut(&id)
         .expect("resolved task id must remain in the store")
         .status = TaskStatus::Done;
-    store.append_log(ubu_core::log_actual(id, ubu_core::ActualStatus::Done, None, now));
+    store.append_log(ubu_core::log_actual(
+        id,
+        ubu_core::ActualStatus::Done,
+        None,
+        now,
+    ));
     Ok(())
 }
 
@@ -414,13 +419,19 @@ pub fn report_window(
 ) -> Result<TimeWindow, String> {
     let parse_date = |value: &str| {
         NaiveDate::parse_from_str(value, "%Y-%m-%d")
-            .map(|date| date.and_hms_opt(0, 0, 0).expect("midnight is valid").and_utc())
+            .map(|date| {
+                date.and_hms_opt(0, 0, 0)
+                    .expect("midnight is valid")
+                    .and_utc()
+            })
             .map_err(|error| format!("invalid report date {value}: {error}"))
     };
     let start = match from {
         Some(value) => parse_date(value)?,
         None => {
-            let duration = i64::try_from(days).ok().and_then(Duration::try_days)
+            let duration = i64::try_from(days)
+                .ok()
+                .and_then(Duration::try_days)
                 .ok_or_else(|| "report --days is out of range".to_string())?;
             now.checked_sub_signed(duration)
                 .ok_or_else(|| "report start is out of range".to_string())?
@@ -992,6 +1003,109 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+
+    #[test]
+    fn done_sets_status_and_appends_exactly_one_actual_at_injected_now() {
+        let mut store = graph_store();
+        let (a, b, _) = graph_ids();
+        let now = fixed_time();
+        store.append_log(ubu_core::log_defer(b, now - Duration::minutes(1)));
+        let existing_log = store.log.clone();
+        done(&mut store, &prefix(a), now).unwrap();
+        assert_eq!(store.tasks[&a].status, TaskStatus::Done);
+        assert_eq!(store.log.len(), existing_log.len() + 1);
+        assert_eq!(&store.log[..existing_log.len()], existing_log.as_slice());
+        let completion = store.log.last().unwrap();
+        assert_eq!(completion.at, now);
+        assert_eq!(
+            completion.kind,
+            ubu_core::LogEntryKind::Fact(ubu_core::FactKind::Actual {
+                item_id: a,
+                status: ubu_core::ActualStatus::Done,
+                actual: None,
+            })
+        );
+    }
+
+    #[test]
+    fn done_with_unknown_or_ambiguous_prefix_leaves_store_unchanged() {
+        let mut store = graph_store();
+        let before = store.clone();
+        for prefix in ["ffffffff", ""] {
+            assert!(done(&mut store, prefix, fixed_time()).is_err());
+            assert_eq!(store, before);
+        }
+    }
+
+    #[test]
+    fn report_window_defaults_and_date_overrides_are_independent() {
+        let now = fixed_time();
+        for days in [0, 7, 14] {
+            assert_eq!(
+                report_window(now, None, None, days).unwrap(),
+                TimeWindow {
+                    start: now - Duration::days(days as i64),
+                    end: now,
+                }
+            );
+        }
+        let from = Utc.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 8, 31, 0, 0, 0).unwrap();
+        assert_eq!(
+            report_window(now, Some("2026-08-28"), None, 7).unwrap(),
+            TimeWindow {
+                start: from,
+                end: now
+            }
+        );
+        assert_eq!(
+            report_window(now, None, Some("2026-08-31"), 7).unwrap(),
+            TimeWindow {
+                start: now - Duration::days(7),
+                end: to
+            }
+        );
+        assert_eq!(
+            report_window(now, Some("2026-08-28"), Some("2026-08-31"), 14).unwrap(),
+            TimeWindow {
+                start: from,
+                end: to
+            }
+        );
+    }
+
+    #[test]
+    fn report_window_rejects_invalid_dates_reversed_bounds_and_overflow() {
+        let now = fixed_time();
+        for date in ["not-a-date", "2026-02-30", "2026-08-28T12:00:00Z"] {
+            assert!(report_window(now, Some(date), None, 7).is_err());
+            assert!(report_window(now, None, Some(date), 7).is_err());
+        }
+        assert!(report_window(now, Some("2026-09-02"), Some("2026-09-01"), 7).is_err());
+        assert!(report_window(now, None, None, u64::MAX).is_err());
+        assert!(report_window(DateTime::<Utc>::MIN_UTC, None, None, 1).is_err());
+    }
+
+    #[test]
+    fn report_output_sorts_by_total_then_category_and_sums_before_rounding() {
+        let totals = BTreeMap::from([
+            ("work".into(), Duration::minutes(372)),
+            ("personal".into(), Duration::minutes(45)),
+            ("business".into(), Duration::minutes(45)),
+        ]);
+        assert_eq!(
+            format_category_report(&totals),
+            "work   6h 12m\nbusiness   0h 45m\npersonal   0h 45m\nTotal   7h 42m\n"
+        );
+        assert_eq!(format_category_report(&BTreeMap::new()), "Total   0h 0m\n");
+        assert_eq!(
+            format_category_report(&BTreeMap::from([
+                ("a".into(), Duration::seconds(40)),
+                ("b".into(), Duration::seconds(40)),
+            ])),
+            "a   0h 0m\nb   0h 0m\nTotal   0h 1m\n"
+        );
+    }
 
     struct StubTransport {
         response: Result<String, String>,

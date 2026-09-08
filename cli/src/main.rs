@@ -266,7 +266,10 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Report(args) => {
             let window = logic::report_window(
-                Utc::now(), args.from.as_deref(), args.to.as_deref(), args.days,
+                Utc::now(),
+                args.from.as_deref(),
+                args.to.as_deref(),
+                args.days,
             )?;
             let totals = ubu_core::report_by_category(&store, window.start, window.end);
             print!("{}", logic::format_category_report(&totals));
@@ -740,6 +743,35 @@ fn transparency_marker(transparent: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_command_parses_defaults_and_overrides_without_io() {
+        let cli = Cli::try_parse_from(["quick-ubu", "report"]).unwrap();
+        let Command::Report(args) = cli.command else {
+            panic!("expected report")
+        };
+        assert_eq!(args.days, 7);
+        assert_eq!(args.from, None);
+        assert_eq!(args.to, None);
+        let cli = Cli::try_parse_from([
+            "quick-ubu",
+            "report",
+            "--days",
+            "14",
+            "--from",
+            "2026-08-01",
+            "--to",
+            "2026-09-01",
+        ])
+        .unwrap();
+        let Command::Report(args) = cli.command else {
+            panic!("expected report")
+        };
+        assert_eq!(args.days, 14);
+        assert_eq!(args.from.as_deref(), Some("2026-08-01"));
+        assert_eq!(args.to.as_deref(), Some("2026-09-01"));
+        assert!(Cli::try_parse_from(["quick-ubu", "report", "--days", "-1"]).is_err());
+    }
 
     #[test]
     fn effective_colors_include_every_legacy_default() {
