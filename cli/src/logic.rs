@@ -121,7 +121,9 @@ pub fn build_advisor_prompt(store: &Store) -> (String, Vec<Id>) {
         .enumerate()
         .map(|(index, id)| (*id, index + 1))
         .collect();
-    let mut prompt = String::from("Propose dependency and preference additions for these tasks:\n");
+    let mut prompt = String::from(
+        "Aggressively extend the dependency and preference structure for these tasks. Propose as many well-justified dependencies and preferences as you can find, including non-obvious ones. Favor thoroughness over caution, grounding every addition in the tasks and existing examples.\n",
+    );
     for (index, id) in index_map.iter().enumerate() {
         writeln!(prompt, "[{}] {}", index + 1, store.tasks[id].title)
             .expect("writing to a String cannot fail");
@@ -153,7 +155,7 @@ pub fn build_advisor_prompt(store: &Store) -> (String, Vec<Id>) {
     }
     writeln!(
         prompt,
-        "Existing relations: {}",
+        "Existing structure (extend it with more relations in the same spirit): {}",
         json!({"dependencies": dependencies, "preferences": preferences})
     )
     .expect("writing to a String cannot fail");
