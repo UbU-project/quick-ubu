@@ -671,7 +671,11 @@ pub fn shuffle_seeded<T>(items: &mut [T], seed: u64) {
 
 /// Shuffle presentation IDs without changing the stored pending queue.
 pub fn shuffled_pending_ids(store: &Store, seed: u64) -> Vec<Id> {
-    let mut ids = store.pending_decisions.iter().map(|decision| decision.id).collect::<Vec<_>>();
+    let mut ids = store
+        .pending_decisions
+        .iter()
+        .map(|decision| decision.id)
+        .collect::<Vec<_>>();
     shuffle_seeded(&mut ids, seed);
     ids
 }
@@ -1163,6 +1167,103 @@ mod tests {
     }
 
     #[test]
+    fn splitmix64_matches_known_outputs() {
+        let mut state = 0;
+        assert_eq!(splitmix64(&mut state), 0xe220_a839_7b1d_cdaf);
+        assert_eq!(splitmix64(&mut state), 0x6e78_9e6a_a1b9_65f4);
+    }
+
+    #[test]
+    fn shuffle_seeded_is_deterministic_seed_sensitive_and_a_permutation() {
+        let original: Vec<_> = (0..128).collect();
+        let mut first = original.clone();
+        let mut repeated = original.clone();
+        let mut other_seed = original.clone();
+        shuffle_seeded(&mut first, 42);
+        shuffle_seeded(&mut repeated, 42);
+        shuffle_seeded(&mut other_seed, 43);
+        assert_eq!(first, repeated);
+        assert_ne!(first, other_seed);
+        assert_ne!(first, original);
+        first.sort();
+        other_seed.sort();
+        assert_eq!(first, original);
+        assert_eq!(other_seed, original);
+    }
+
+    #[test]
+    fn shuffle_preserves_duplicates_and_handles_empty_and_singleton_slices() {
+        for seed in [0, 1, u64::MAX] {
+            let mut empty: Vec<String> = Vec::new();
+            shuffle_seeded(&mut empty, seed);
+            assert!(empty.is_empty());
+            let mut singleton = ["only".to_string()];
+            shuffle_seeded(&mut singleton, seed);
+            assert_eq!(singleton, ["only"]);
+            let mut repeated = vec![
+                "a".to_string(),
+                "b".to_string(),
+                "a".to_string(),
+                "c".to_string(),
+            ];
+            shuffle_seeded(&mut repeated, seed);
+            repeated.sort();
+            assert_eq!(repeated, ["a", "a", "b", "c"]);
+        }
+    }
+
+    #[test]
+    fn shuffled_pending_ids_are_stable_complete_and_do_not_mutate_the_store() {
+        let mut store = graph_store();
+        let (a, b, _) = graph_ids();
+        assert!(shuffled_pending_ids(&store, 42).is_empty());
+        for index in 0..64 {
+            store.pending_decisions.push(if index % 2 == 0 {
+                preference_decision(id(1000 + index), a, b)
+            } else {
+                dependency_decision(id(1000 + index), a, b)
+            });
+        }
+        let before = store.clone();
+        let ids = shuffled_pending_ids(&store, 42);
+        assert_eq!(ids, shuffled_pending_ids(&store, 42));
+        assert_ne!(ids, shuffled_pending_ids(&store, 43));
+        assert_eq!(ids.len(), store.pending_decisions.len());
+        let unique: BTreeSet<_> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len());
+        assert_eq!(
+            unique,
+            store
+                .pending_decisions
+                .iter()
+                .map(|decision| decision.id)
+                .collect()
+        );
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn shuffled_decisions_resolve_by_id_and_preserve_remaining_queue_order() {
+        let mut store = graph_store();
+        enqueue_incomparable_pairs(&mut store);
+        let original = store.pending_decisions.clone();
+        let ids = shuffled_pending_ids(&store, 42);
+        resolve_decision(&mut store, ids[0], Answer::Skip).unwrap();
+        assert_eq!(
+            store.pending_decisions,
+            original
+                .into_iter()
+                .filter(|decision| decision.id != ids[0])
+                .collect::<Vec<_>>()
+        );
+        for id in &ids[1..] {
+            resolve_decision(&mut store, *id, Answer::Skip).unwrap();
+        }
+        assert!(store.pending_decisions.is_empty());
+        assert_eq!(store.decision_history.len(), ids.len());
+    }
+
+    #[test]
     fn resolve_model_uses_override_then_persisted_model_or_clear_error() {
         let mut store = Store::new();
         assert_eq!(
@@ -1241,7 +1342,11 @@ mod tests {
         assert!(!prompt.contains("Excluded"));
         let existing = prompt
             .lines()
-            .find_map(|line| line.strip_prefix("Existing relations: "))
+            .find_map(|line| {
+                line.strip_prefix(
+                    "Existing structure (extend it with more relations in the same spirit): ",
+                )
+            })
             .unwrap();
         let existing: Value = serde_json::from_str(existing).unwrap();
         assert_eq!(
@@ -1255,6 +1360,10 @@ mod tests {
             })
         );
         for instruction in [
+            "Aggressively extend",
+            "as many well-justified dependencies and preferences as you can find",
+            "including non-obvious ones",
+            "Favor thoroughness over caution",
             "Use only listed indices",
             "do not repeat existing relations",
             "do not create cycles",

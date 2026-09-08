@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use chrono::{Duration, NaiveTime};
 use ubu_core::{Recurrence, RoutineTemplate, Store, TaskStatus, Tier};
@@ -26,6 +27,108 @@ fn assert_success(output: &Output) {
         "command failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn quick_ubu_with_input(store: &Path, command: &str, input: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_quick-ubu"))
+        .arg("--store")
+        .arg(store)
+        .arg(command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn prioritize_enqueues_before_review_and_quitting_keeps_the_queue_in_order() {
+    let (directory, store_path) = temp_store();
+    for title in ["Alpha", "Bravo", "Charlie"] {
+        assert_success(&quick_ubu(
+            &store_path,
+            &["add", "--title", title, "--duration", "30"],
+        ));
+    }
+    let output = quick_ubu_with_input(&store_path, "prioritize", "q\n");
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("enqueued 3\n"));
+    assert_eq!(stdout.matches("Preference:").count(), 1);
+    let before: Store = serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
+    let task_ids: Vec<_> = before.tasks.keys().copied().collect();
+    let pairs: Vec<_> = before
+        .pending_decisions
+        .iter()
+        .map(|decision| {
+            let ubu_core::Proposal::Preference { a, b, .. } = &decision.proposal else {
+                panic!("expected preference")
+            };
+            (*a, *b)
+        })
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            (task_ids[0], task_ids[1]),
+            (task_ids[0], task_ids[2]),
+            (task_ids[1], task_ids[2])
+        ]
+    );
+    let output = quick_ubu_with_input(&store_path, "review", "q\n");
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .matches("Preference:")
+            .count(),
+        1
+    );
+    let after: Store = serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
+    assert_eq!(after, before);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn review_presents_each_pending_pair_once_and_drains_all_skipped_decisions() {
+    let (directory, store_path) = temp_store();
+    for title in ["Alpha", "Bravo", "Charlie"] {
+        assert_success(&quick_ubu(
+            &store_path,
+            &["add", "--title", title, "--duration", "30"],
+        ));
+    }
+    assert_success(&quick_ubu_with_input(&store_path, "prioritize", "q\n"));
+    let before: Store = serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
+    let output = quick_ubu_with_input(&store_path, "review", "s\ns\ns\n");
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout.matches("Preference:").count(), 3);
+    let after: Store = serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
+    assert!(after.pending_decisions.is_empty());
+    assert_eq!(after.decision_history.len(), 3);
+    for decision in before.pending_decisions {
+        assert_eq!(
+            after
+                .decision_history
+                .iter()
+                .filter(|record| record.proposal == decision.proposal)
+                .count(),
+            1
+        );
+    }
+    assert!(after
+        .decision_history
+        .iter()
+        .all(|record| record.resolution == ubu_core::Resolution::Skipped));
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
