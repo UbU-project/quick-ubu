@@ -35,6 +35,8 @@ enum Command {
     Add(AddArgs),
     List,
     Done { prefix: String },
+    /// Report stored time by category, including transparent tasks.
+    Report(ReportArgs),
     Defer { prefix: String },
     DepAdd {
         task: String,
@@ -143,6 +145,19 @@ struct ReplanArgs {
 }
 
 #[derive(Debug, Args)]
+struct ReportArgs {
+    /// Inclusive start date at midnight UTC (YYYY-MM-DD).
+    #[arg(long)]
+    from: Option<String>,
+    /// Inclusive end date at midnight UTC (YYYY-MM-DD).
+    #[arg(long)]
+    to: Option<String>,
+    /// Default lookback from now; --from overrides the start.
+    #[arg(long, default_value_t = 7)]
+    days: u64,
+}
+
+#[derive(Debug, Args)]
 struct NextArgs {
     #[arg(long, default_value_t = 100)]
     affect_cap: i32,
@@ -248,6 +263,13 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Done { prefix } => {
             logic::done(&mut store, &prefix, Utc::now())?;
             persist::save(&cli.store, &store)?;
+        }
+        Command::Report(args) => {
+            let window = logic::report_window(
+                Utc::now(), args.from.as_deref(), args.to.as_deref(), args.days,
+            )?;
+            let totals = ubu_core::report_by_category(&store, window.start, window.end);
+            print!("{}", logic::format_category_report(&totals));
         }
         Command::Defer { prefix } => {
             logic::defer(&mut store, &prefix)?;

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use ollama_planner::LlmTransport;
 use serde_json::{json, Value};
 use ubu_core::{
@@ -403,6 +403,57 @@ pub fn done(store: &mut Store, prefix: &str, now: DateTime<Utc>) -> Result<(), S
 
 pub fn defer(store: &mut Store, prefix: &str) -> Result<(), String> {
     set_status(store, prefix, TaskStatus::Deferred)
+}
+
+/// Date overrides are midnight UTC and independently replace the default bounds.
+pub fn report_window(
+    now: DateTime<Utc>,
+    from: Option<&str>,
+    to: Option<&str>,
+    days: u64,
+) -> Result<TimeWindow, String> {
+    let parse_date = |value: &str| {
+        NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .map(|date| date.and_hms_opt(0, 0, 0).expect("midnight is valid").and_utc())
+            .map_err(|error| format!("invalid report date {value}: {error}"))
+    };
+    let start = match from {
+        Some(value) => parse_date(value)?,
+        None => {
+            let duration = i64::try_from(days).ok().and_then(Duration::try_days)
+                .ok_or_else(|| "report --days is out of range".to_string())?;
+            now.checked_sub_signed(duration)
+                .ok_or_else(|| "report start is out of range".to_string())?
+        }
+    };
+    let end = to.map(parse_date).transpose()?.unwrap_or(now);
+    if start > end {
+        return Err("report --from must not be after --to".to_string());
+    }
+    Ok(TimeWindow { start, end })
+}
+
+pub fn format_category_report(totals: &BTreeMap<String, Duration>) -> String {
+    let mut rows: Vec<_> = totals.iter().collect();
+    rows.sort_by(|left, right| right.1.cmp(left.1).then_with(|| left.0.cmp(right.0)));
+    let mut output = String::new();
+    let mut grand_total = Duration::zero();
+    for (category, duration) in rows {
+        writeln!(output, "{category}   {}", report_duration(*duration))
+            .expect("writing to a String cannot fail");
+        grand_total += *duration;
+    }
+    writeln!(output, "Total   {}", report_duration(grand_total))
+        .expect("writing to a String cannot fail");
+    output
+}
+
+// Display whole minutes, truncating sub-minute remainders only after summing.
+fn report_duration(duration: Duration) -> String {
+    let minutes = duration.num_minutes();
+    let sign = if minutes < 0 { "-" } else { "" };
+    let minutes = minutes.unsigned_abs();
+    format!("{sign}{}h {}m", minutes / 60, minutes % 60)
 }
 
 pub fn singleton_bundle_for(store: &mut Store, task_id: Id) -> Id {
