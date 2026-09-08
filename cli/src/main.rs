@@ -77,8 +77,12 @@ enum Command {
         model: Option<String>,
         #[arg(long, default_value = "http://localhost:11434")]
         ollama_url: String,
+        /// Seconds from request start to the first complete Ollama stream message.
         #[arg(long, default_value_t = 300)]
         ollama_timeout: u64,
+        /// Maximum seconds for the entire Ollama generation, including startup.
+        #[arg(long, default_value_t = 600)]
+        ollama_total_timeout: u64,
     },
     ObjectiveAdd(ObjectiveAddArgs),
     Replan(ReplanArgs),
@@ -141,8 +145,12 @@ struct ReplanArgs {
     ollama_url: String,
     #[arg(long)]
     model: Option<String>,
+    /// Seconds from request start to the first complete Ollama stream message.
     #[arg(long, default_value_t = 300)]
     ollama_timeout: u64,
+    /// Maximum seconds for the entire Ollama generation, including startup.
+    #[arg(long, default_value_t = 600)]
+    ollama_total_timeout: u64,
 }
 
 #[derive(Debug, Args)]
@@ -348,12 +356,14 @@ fn run(cli: Cli) -> Result<(), String> {
             model,
             ollama_url,
             ollama_timeout,
+            ollama_total_timeout,
         } => {
             let resolved_model = logic::resolve_model(&store, model)?;
             let transport = OllamaHttpTransport {
                 base_url: ollama_url,
                 model: resolved_model.clone(),
                 timeout_secs: ollama_timeout,
+                total_timeout_secs: ollama_total_timeout,
             };
             let report = logic::advise(&mut store, &transport, Some(resolved_model))?;
             persist::save(&cli.store, &store)?;
@@ -378,6 +388,7 @@ fn run(cli: Cli) -> Result<(), String> {
                         base_url: args.ollama_url,
                         model,
                         timeout_secs: args.ollama_timeout,
+                        total_timeout_secs: args.ollama_total_timeout,
                     });
                     logic::replan_with_planner(
                         &store,
@@ -895,10 +906,12 @@ mod tests {
                 model,
                 ollama_url,
                 ollama_timeout,
+                ollama_total_timeout,
             } => {
                 assert_eq!(model, None);
                 assert_eq!(ollama_url, "http://localhost:11434");
                 assert_eq!(ollama_timeout, 300);
+                assert_eq!(ollama_total_timeout, 600);
             }
             _ => panic!("expected advise"),
         }
@@ -911,6 +924,8 @@ mod tests {
             "http://unused.invalid",
             "--ollama-timeout",
             "9",
+            "--ollama-total-timeout",
+            "18",
         ])
         .unwrap();
         match cli.command {
@@ -918,10 +933,12 @@ mod tests {
                 model,
                 ollama_url,
                 ollama_timeout,
+                ollama_total_timeout,
             } => {
                 assert_eq!(model.as_deref(), Some("override"));
                 assert_eq!(ollama_url, "http://unused.invalid");
                 assert_eq!(ollama_timeout, 9);
+                assert_eq!(ollama_total_timeout, 18);
             }
             _ => panic!("expected advise"),
         }
@@ -932,6 +949,8 @@ mod tests {
             match cli.command {
                 Command::Replan(args) => {
                     assert_eq!(args.model.as_deref(), model_args.get(1).copied());
+                    assert_eq!(args.ollama_timeout, 300);
+                    assert_eq!(args.ollama_total_timeout, 600);
                 }
                 _ => panic!("expected replan"),
             }

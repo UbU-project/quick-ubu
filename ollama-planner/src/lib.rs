@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
+use std::future::Future;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -14,6 +15,7 @@ pub struct OllamaHttpTransport {
     pub base_url: String,
     pub model: String,
     pub timeout_secs: u64,
+    pub total_timeout_secs: u64,
 }
 
 impl OllamaHttpTransport {
@@ -21,10 +23,10 @@ impl OllamaHttpTransport {
         json!({
             "model": self.model,
             "prompt": prompt,
-            "stream": false,
+            "stream": true,
             "format": "json",
             // API equivalent of `ollama run --think=false`. Thinking output is
-            // already omitted by parse_generate_response (`--hidethinking`).
+            // already omitted from the assembled answer (`--hidethinking`).
             "think": false,
         })
     }
@@ -40,8 +42,13 @@ struct GenerateResponse {
     thinking: Option<String>,
 }
 
+#[cfg(test)]
 fn parse_generate_response(body: &str, model: &str) -> Result<String, String> {
     let body: GenerateResponse = serde_json::from_str(body).map_err(|error| error.to_string())?;
+    completed_answer(body, model)
+}
+
+fn completed_answer(body: GenerateResponse, model: &str) -> Result<String, String> {
     if body.response.trim().is_empty() {
         // Report completion metadata without exposing the prompt or thinking text.
         let diagnostics = json!({
@@ -59,6 +66,134 @@ fn parse_generate_response(body: &str, model: &str) -> Result<String, String> {
     Ok(body.response)
 }
 
+trait GenerateStream {
+    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, String>;
+}
+
+impl GenerateStream for reqwest::Response {
+    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, String> {
+        self.chunk()
+            .await
+            .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
+            .map_err(|error| format!("failed to read Ollama stream: {error}"))
+    }
+}
+
+#[derive(Default)]
+struct StreamAnswer {
+    pending: Vec<u8>,
+    text: String,
+    thinking_present: bool,
+    received_message: bool,
+}
+
+impl StreamAnswer {
+    fn message(&mut self, line: &[u8], model: &str) -> Result<Option<String>, String> {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            return Ok(None);
+        }
+        let value: serde_json::Value = serde_json::from_slice(line)
+            .map_err(|error| format!("invalid Ollama stream JSON: {error}"))?;
+        if let Some(error) = value.get("error").and_then(|value| value.as_str()) {
+            return Err(format!("Ollama stream error: {error}"));
+        }
+        let mut message: GenerateResponse = serde_json::from_value(value)
+            .map_err(|error| format!("invalid Ollama stream message: {error}"))?;
+        self.received_message = true;
+        self.text.push_str(&message.response);
+        self.thinking_present |= message
+            .thinking
+            .as_ref()
+            .is_some_and(|text| !text.trim().is_empty());
+        if message.done == Some(true) {
+            message.response = std::mem::take(&mut self.text);
+            // Preserve presence across chunks without retaining thinking content.
+            message.thinking = self.thinking_present.then(|| "present".to_string());
+            return completed_answer(message, model).map(Some);
+        }
+        Ok(None)
+    }
+
+    fn push(&mut self, bytes: &[u8], model: &str) -> Result<Option<String>, String> {
+        self.pending.extend_from_slice(bytes);
+        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<_> = self.pending.drain(..=end).collect();
+            if let Some(answer) = self.message(&line, model)? {
+                return Ok(Some(answer));
+            }
+        }
+        Ok(None)
+    }
+}
+
+async fn generate_with_deadlines<S: GenerateStream>(
+    open: impl Future<Output = Result<S, String>>,
+    model: &str,
+    first_timeout: Duration,
+    total_timeout: Duration,
+) -> Result<String, String> {
+    let start = tokio::time::Instant::now();
+    let first_deadline = start
+        .checked_add(first_timeout)
+        .ok_or_else(|| "Ollama first-response timeout is out of range".to_string())?;
+    let total_deadline = start
+        .checked_add(total_timeout)
+        .ok_or_else(|| "Ollama total timeout is out of range".to_string())?;
+    let first_error = || {
+        format!(
+            "Ollama first-response timeout after {}s: no complete stream message received",
+            first_timeout.as_secs_f64()
+        )
+    };
+    let total_error = || {
+        format!(
+            "Ollama total execution timeout after {}s; partial answer discarded",
+            total_timeout.as_secs_f64()
+        )
+    };
+    let run = async {
+        let mut stream = tokio::time::timeout_at(first_deadline, open)
+            .await
+            .map_err(|_| first_error())??;
+        let mut answer = StreamAnswer::default();
+        loop {
+            if tokio::time::Instant::now() >= total_deadline {
+                return Err(total_error());
+            }
+            if !answer.received_message && tokio::time::Instant::now() >= first_deadline {
+                return Err(first_error());
+            }
+            let chunk = if answer.received_message {
+                stream.next_chunk().await?
+            } else {
+                tokio::time::timeout_at(first_deadline, stream.next_chunk())
+                    .await
+                    .map_err(|_| first_error())??
+            };
+            match chunk {
+                Some(bytes) => {
+                    if let Some(text) = answer.push(&bytes, model)? {
+                        return Ok(text);
+                    }
+                }
+                None => {
+                    let last = std::mem::take(&mut answer.pending);
+                    if let Some(text) = answer.message(&last, model)? {
+                        return Ok(text);
+                    }
+                    return Err(
+                        "Ollama stream ended before done=true; partial answer discarded"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    };
+    tokio::time::timeout_at(total_deadline, run)
+        .await
+        .map_err(|_| total_error())?
+}
+
 #[derive(Deserialize)]
 struct OrderResponse {
     order: Vec<uuid::Uuid>,
@@ -67,17 +202,32 @@ struct OrderResponse {
 impl LlmTransport for OllamaHttpTransport {
     fn generate(&self, prompt: &str) -> Result<String, String> {
         let url = format!("{}/api/generate", self.base_url.trim_end_matches('/'));
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(self.timeout_secs))
-            .build();
-        let body = self.request_body(prompt).to_string();
-        let response = agent
-            .post(&url)
-            .set("Content-Type", "application/json")
-            .send_string(&body)
-            .map_err(|error| error.to_string())?;
-        let body = response.into_string().map_err(|error| error.to_string())?;
-        parse_generate_response(&body, &self.model)
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("failed to start Ollama runtime: {error}"))?;
+        runtime.block_on(async {
+            let client = reqwest::Client::builder()
+                .build()
+                .map_err(|error| format!("failed to initialize Ollama client: {error}"))?;
+            let open = async {
+                client
+                    .post(url)
+                    .json(&self.request_body(prompt))
+                    .send()
+                    .await
+                    .map_err(|error| format!("failed to connect to Ollama: {error}"))?
+                    .error_for_status()
+                    .map_err(|error| format!("Ollama HTTP error: {error}"))
+            };
+            generate_with_deadlines(
+                open,
+                &self.model,
+                Duration::from_secs(self.timeout_secs),
+                Duration::from_secs(self.total_timeout_secs),
+            )
+            .await
+        })
     }
 }
 
@@ -216,6 +366,200 @@ mod tests {
 
     use super::*;
 
+    struct FakeStream {
+        chunks: std::collections::VecDeque<(u64, Vec<u8>)>,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl FakeStream {
+        fn new(chunks: impl IntoIterator<Item = (u64, Vec<u8>)>) -> Self {
+            Self {
+                chunks: chunks.into_iter().collect(),
+                dropped: Default::default(),
+            }
+        }
+    }
+
+    impl Drop for FakeStream {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl GenerateStream for FakeStream {
+        async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, String> {
+            if let Some((delay, bytes)) = self.chunks.pop_front() {
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+                Ok(Some(bytes))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    fn record(response: &str, done: bool) -> Vec<u8> {
+        format!("{}\n", json!({"response": response, "done": done})).into_bytes()
+    }
+
+    async fn stream_answer(stream: FakeStream) -> Result<String, String> {
+        generate_with_deadlines(
+            async { Ok(stream) },
+            "test-model",
+            Duration::from_secs(300),
+            Duration::from_secs(600),
+        )
+        .await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn streaming_assembles_split_utf8_lines_and_final_fragment() {
+        let mut bytes = record("{\"name\":\"café", false);
+        bytes.extend(record("\"}", true));
+        let split = bytes.iter().position(|b| *b == 0xc3).unwrap() + 1;
+        let chunks = vec![(0, bytes[..split].to_vec()), (0, bytes[split..].to_vec())];
+        assert_eq!(
+            stream_answer(FakeStream::new(chunks)).await.unwrap(),
+            "{\"name\":\"café\"}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_record_without_newline_is_accepted_at_eof() {
+        let mut bytes = record("{}", true);
+        bytes.pop();
+        assert_eq!(
+            stream_answer(FakeStream::new([(0, bytes)])).await.unwrap(),
+            "{}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn thinking_presence_survives_until_empty_completion_diagnostics() {
+        let thinking = format!(
+            "{}\n",
+            json!({"response":"", "thinking":"private thoughts", "done":false})
+        )
+        .into_bytes();
+        let completion = format!(
+            "{}\n",
+            json!({"response":"", "done":true, "done_reason":"stop", "eval_count":30})
+        )
+        .into_bytes();
+        let error = stream_answer(FakeStream::new([(0, thinking.clone()), (0, completion)]))
+            .await
+            .unwrap_err();
+        assert!(error.contains("empty answer"));
+        assert!(error.contains("\"thinking_present\":true"));
+        assert!(error.contains("\"eval_count\":30"));
+        assert!(!error.contains("private thoughts"));
+        assert_eq!(
+            stream_answer(FakeStream::new([(0, thinking), (0, record("{}", true))]))
+                .await
+                .unwrap(),
+            "{}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invalid_or_incomplete_streams_discard_partial_answers() {
+        for (bytes, expected) in [
+            (b"not JSON\n".to_vec(), "invalid Ollama stream JSON"),
+            (b"{}\n".to_vec(), "invalid Ollama stream message"),
+            (
+                b"{\"error\":\"model failed\"}\n".to_vec(),
+                "Ollama stream error: model failed",
+            ),
+            (record("{}", false), "ended before done=true"),
+            (Vec::new(), "ended before done=true"),
+        ] {
+            let error = stream_answer(FakeStream::new([(0, bytes)]))
+                .await
+                .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_response_deadline_includes_connection_and_partial_records() {
+        let start = tokio::time::Instant::now();
+        let open = async {
+            tokio::time::sleep(Duration::from_secs(200)).await;
+            Ok(FakeStream::new([
+                (50, b"\n{\"response\":".to_vec()),
+                (60, b"\"{}\",\"done\":true}\n".to_vec()),
+            ]))
+        };
+        let error = generate_with_deadlines(
+            open,
+            "test-model",
+            Duration::from_secs(300),
+            Duration::from_secs(600),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.contains("first-response timeout after 300s"),
+            "{error}"
+        );
+        assert_eq!(start.elapsed(), Duration::from_secs(300));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadlines_apply_while_waiting_for_http_headers() {
+        for (first, total, expected, elapsed) in [
+            (300, 600, "first-response timeout", 300),
+            (300, 200, "total execution timeout", 200),
+        ] {
+            let start = tokio::time::Instant::now();
+            let open = async {
+                tokio::time::sleep(Duration::from_secs(700)).await;
+                Ok(FakeStream::new([]))
+            };
+            let error = generate_with_deadlines(
+                open,
+                "test-model",
+                Duration::from_secs(first),
+                Duration::from_secs(total),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert_eq!(start.elapsed(), Duration::from_secs(elapsed));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn generation_can_continue_past_first_response_deadline() {
+        let start = tokio::time::Instant::now();
+        let stream = FakeStream::new([(200, record("{", false)), (350, record("}", true))]);
+        assert_eq!(stream_answer(stream).await.unwrap(), "{}");
+        assert_eq!(start.elapsed(), Duration::from_secs(550));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn total_deadline_cancels_stalled_and_progressing_streams() {
+        for chunks in [
+            vec![(100, record("{", false)), (501, record("}", true))],
+            vec![
+                (200, record("{", false)),
+                (200, record(" ", false)),
+                (201, record("}", true)),
+            ],
+        ] {
+            let start = tokio::time::Instant::now();
+            let stream = FakeStream::new(chunks);
+            let dropped = stream.dropped.clone();
+            let error = stream_answer(stream).await.unwrap_err();
+            assert!(
+                error.contains("total execution timeout after 600s; partial answer discarded"),
+                "{error}"
+            );
+            assert_eq!(start.elapsed(), Duration::from_secs(600));
+            assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        }
+    }
+
     #[derive(Clone)]
     struct StubTransport {
         response: Result<String, String>,
@@ -233,10 +577,11 @@ mod tests {
             base_url: "http://unused.invalid".into(),
             model: "test-model".into(),
             timeout_secs: 300,
+            total_timeout_secs: 600,
         };
         let body = transport.request_body("Return only JSON");
         assert_eq!(body["think"].as_bool(), Some(false));
-        assert_eq!(body["stream"].as_bool(), Some(false));
+        assert_eq!(body["stream"].as_bool(), Some(true));
         assert_eq!(body["format"], "json");
         assert!(body.get("hidethinking").is_none());
     }

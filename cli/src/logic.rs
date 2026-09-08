@@ -124,9 +124,44 @@ pub fn build_advisor_prompt(store: &Store) -> (String, Vec<Id>) {
     let mut prompt = String::from(
         "Aggressively extend the dependency and preference structure for these tasks. Propose as many well-justified dependencies and preferences as you can find, including non-obvious ones. Favor thoroughness over caution, grounding every addition in the tasks and existing examples.\n",
     );
+    prompt.push_str(
+        "Each [N] identifies the task described by the JSON on that line; all relation indices refer to these same tasks. Use their titles, details, constraints, and objectives as evidence. Null fields are unspecified. Positive affect_cost is draining; negative is restorative. A dependency means the blocker must finish before the blocked task; a_strict_b means A is preferred to B, b_strict_a means B is preferred to A, and indifferent means equal preference. A preference alone does not imply a prerequisite.\n",
+    );
     for (index, id) in index_map.iter().enumerate() {
-        writeln!(prompt, "[{}] {}", index + 1, store.tasks[id].title)
-            .expect("writing to a String cannot fail");
+        let task = &store.tasks[id];
+        let objectives: Vec<_> = task
+            .objective_ids
+            .iter()
+            .filter_map(|id| store.objectives.get(id))
+            .map(|objective| {
+                json!({
+                    "title": objective.title,
+                    "detail": objective.detail,
+                    "target_date": objective.target_date,
+                    "status": objective.status,
+                })
+            })
+            .collect();
+        writeln!(
+            prompt,
+            "[{}] {}",
+            index + 1,
+            json!({
+                "title": task.title,
+                "detail": task.detail,
+                "status": task.status,
+                "duration_minutes": task.est_duration.num_minutes(),
+                "due": task.due,
+                "earliest_start": task.earliest_start,
+                "category": task.category,
+                "skills": task.skills,
+                "affect_cost": task.affect_cost,
+                "transparent": task.transparent,
+                "commitment": task.commitment,
+                "objectives": objectives,
+            })
+        )
+        .expect("writing to a String cannot fail");
     }
     // Only relations with both endpoints listed can be expressed in index terms.
     let mut dependencies = Vec::new();
@@ -1336,8 +1371,14 @@ mod tests {
 
         let (prompt, map) = build_advisor_prompt(&store);
         assert_eq!(map, vec![a, b, c]);
-        for label in ["[1] Alpha", "[2] Bravo", "[3] Charlie"] {
-            assert!(prompt.contains(label));
+        for (index, title) in [(1, "Alpha"), (2, "Bravo"), (3, "Charlie")] {
+            let prefix = format!("[{index}] ");
+            let row = prompt
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap();
+            let task: Value = serde_json::from_str(row).unwrap();
+            assert_eq!(task["title"], title);
         }
         assert!(!prompt.contains("Excluded"));
         let existing = prompt
@@ -1372,6 +1413,59 @@ mod tests {
             assert!(prompt.contains(instruction));
         }
         assert_eq!(build_advisor_prompt(&store), (prompt, map));
+    }
+
+    #[test]
+    fn advisor_prompt_includes_task_context_and_resolves_objective_text() {
+        let (a, _, _) = graph_ids();
+        let mut store = graph_store();
+        let objective_id = objective_add(
+            &mut store,
+            ObjectiveAddInput {
+                title: "Publish research".into(),
+                tier: Tier::Public,
+                target_date: Some(fixed_time() + Duration::days(7)),
+            },
+        );
+        store.objectives.get_mut(&objective_id).unwrap().detail =
+            Some("Explain the results".into());
+        let task = store.tasks.get_mut(&a).unwrap();
+        task.title = "Draft \"results\"\nsection".into();
+        task.detail = Some("Use the completed analysis.\nInclude café examples.".into());
+        task.objective_ids = vec![objective_id];
+        task.est_duration = Duration::minutes(45);
+        task.due = Some(fixed_time() + Duration::days(2));
+        task.earliest_start = Some(fixed_time());
+        task.category = Some("research".into());
+        task.skills = vec!["writing".into()];
+        task.affect_cost = 3;
+        task.commitment = Some(ubu_core::Commitment {
+            person: "Editor".into(),
+            note: Some("Send a draft".into()),
+        });
+        let (prompt, _) = build_advisor_prompt(&store);
+        let row = prompt
+            .lines()
+            .find_map(|line| line.strip_prefix("[1] "))
+            .unwrap();
+        let context: Value = serde_json::from_str(row).unwrap();
+        let task = &store.tasks[&a];
+        assert_eq!(context["title"], task.title);
+        assert_eq!(context["detail"], task.detail.as_deref().unwrap());
+        assert_eq!(context["duration_minutes"], 45);
+        assert_eq!(context["due"], json!(task.due));
+        assert_eq!(context["earliest_start"], json!(task.earliest_start));
+        assert_eq!(context["category"], "research");
+        assert_eq!(context["skills"], json!(["writing"]));
+        assert_eq!(context["affect_cost"], 3);
+        assert_eq!(context["commitment"]["note"], "Send a draft");
+        assert_eq!(
+            context["objectives"],
+            json!([{
+                "title": "Publish research", "detail": "Explain the results",
+                "target_date": fixed_time() + Duration::days(7), "status": "Active",
+            }])
+        );
     }
 
     #[test]
