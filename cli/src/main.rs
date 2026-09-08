@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Duration, NaiveDate, Utc, Weekday};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -505,11 +506,11 @@ fn run(cli: Cli) -> Result<(), String> {
 }
 
 fn review_decisions(store: &mut ubu_core::Store) -> Result<(), String> {
-    let decision_ids = store
-        .pending_decisions
-        .iter()
-        .map(|decision| decision.id)
-        .collect::<Vec<_>>();
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let decision_ids = logic::shuffled_pending_ids(store, seed);
     let stdin = io::stdin();
 
     for decision_id in decision_ids {

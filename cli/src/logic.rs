@@ -669,6 +669,13 @@ pub fn shuffle_seeded<T>(items: &mut [T], seed: u64) {
     }
 }
 
+/// Shuffle presentation IDs without changing the stored pending queue.
+pub fn shuffled_pending_ids(store: &Store, seed: u64) -> Vec<Id> {
+    let mut ids = store.pending_decisions.iter().map(|decision| decision.id).collect::<Vec<_>>();
+    shuffle_seeded(&mut ids, seed);
+    ids
+}
+
 pub fn enqueue_incomparable_pairs(store: &mut Store) -> usize {
     let task_ids = store
         .tasks
