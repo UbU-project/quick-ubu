@@ -246,7 +246,7 @@ fn run(cli: Cli) -> Result<(), String> {
             }
         }
         Command::Done { prefix } => {
-            logic::done(&mut store, &prefix)?;
+            logic::done(&mut store, &prefix, Utc::now())?;
             persist::save(&cli.store, &store)?;
         }
         Command::Defer { prefix } => {

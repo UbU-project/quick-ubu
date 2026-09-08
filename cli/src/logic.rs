@@ -390,8 +390,15 @@ pub fn list(store: &Store) -> Vec<TaskRow> {
         .collect()
 }
 
-pub fn done(store: &mut Store, prefix: &str) -> Result<(), String> {
-    set_status(store, prefix, TaskStatus::Done)
+pub fn done(store: &mut Store, prefix: &str, now: DateTime<Utc>) -> Result<(), String> {
+    let id = resolve_task_id(store, prefix)?;
+    store
+        .tasks
+        .get_mut(&id)
+        .expect("resolved task id must remain in the store")
+        .status = TaskStatus::Done;
+    store.append_log(ubu_core::log_actual(id, ubu_core::ActualStatus::Done, None, now));
+    Ok(())
 }
 
 pub fn defer(store: &mut Store, prefix: &str) -> Result<(), String> {
