@@ -644,6 +644,31 @@ pub fn pref_list(store: &Store) -> Vec<String> {
     lines
 }
 
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut value = *state;
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+/// Fisher–Yates shuffle with a deterministic SplitMix64 stream for each seed.
+pub fn shuffle_seeded<T>(items: &mut [T], seed: u64) {
+    let mut state = seed;
+    for index in (1..items.len()).rev() {
+        let bound = (index + 1) as u64;
+        // Reject the incomplete residue block to avoid modulo bias.
+        let threshold = bound.wrapping_neg() % bound;
+        let chosen = loop {
+            let value = splitmix64(&mut state);
+            if value >= threshold {
+                break (value % bound) as usize;
+            }
+        };
+        items.swap(index, chosen);
+    }
+}
+
 pub fn enqueue_incomparable_pairs(store: &mut Store) -> usize {
     let task_ids = store
         .tasks
