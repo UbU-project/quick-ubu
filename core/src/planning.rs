@@ -510,6 +510,234 @@ mod tests {
         }
     }
 
+    fn after_store() -> Store {
+        let mut store = Store::new();
+        store.upsert_task(task(9, TaskStatus::Backlog, vec![]));
+        let mut successor = task(1, TaskStatus::Backlog, vec![]);
+        successor.after.push(crate::AfterConstraint {
+            task_id: id(9),
+            offset: Duration::minutes(60),
+        });
+        store.upsert_task(successor);
+        store
+    }
+
+    fn after_plan(
+        store: &Store,
+        fixed: &[Handle],
+        target: ComputeTarget,
+    ) -> Result<Plan, CoreError> {
+        re_plan(
+            store,
+            target,
+            at(0),
+            at(0),
+            fixed,
+            &AffectBudget { cap: 10 },
+            &DeterministicPlacer,
+        )
+    }
+
+    fn window(plan: &Plan, value: u128) -> &TimeWindow {
+        &plan
+            .entries
+            .iter()
+            .find(|entry| entry.item == id(value))
+            .unwrap()
+            .window
+    }
+
+    fn after_conflict(plan: &Plan, reason: &str) {
+        assert!(!plan.entries.iter().any(|entry| entry.item == id(1)));
+        assert!(plan.conflicts.contains(&Conflict {
+            item: id(1),
+            reason: reason.into()
+        }));
+    }
+
+    #[test]
+    fn after_orders_before_rank_and_uses_placed_end_plus_sixty_minutes() {
+        let store = after_store();
+        assert_eq!(
+            candidate_order(
+                &store,
+                &store.tasks.keys().copied().collect(),
+                &[(id(1), 0), (id(9), 1)].into_iter().collect()
+            )
+            .unwrap(),
+            vec![id(9), id(1)]
+        );
+        let plan = after_plan(&store, &[], ComputeTarget::DesktopOllama).unwrap();
+        assert!(plan.conflicts.is_empty());
+        assert_eq!(
+            window(&plan, 1).start,
+            window(&plan, 9).end + Duration::minutes(60)
+        );
+    }
+
+    #[test]
+    fn after_pinned_and_fixed_block_references_use_end_plus_thirty_minutes() {
+        for pinned in [true, false] {
+            let mut store = after_store();
+            store.tasks.get_mut(&id(1)).unwrap().after[0].offset = Duration::minutes(30);
+            let reference = store.tasks.get_mut(&id(9)).unwrap();
+            reference.status = TaskStatus::Active;
+            let fixed_window = TimeWindow {
+                start: at(0),
+                end: at(7200),
+            };
+            let mut fixed = vec![];
+            if pinned {
+                reference.pinned = Some(fixed_window);
+            } else {
+                fixed.push(Handle {
+                    id: id(9),
+                    window: Some(fixed_window),
+                    duration: Duration::hours(2),
+                    status: crate::HandleStatus::Active,
+                    deferrable: false,
+                });
+            }
+            let plan = after_plan(&store, &fixed, ComputeTarget::DesktopOllama).unwrap();
+            assert_eq!(window(&plan, 1).start, at(9000));
+        }
+    }
+
+    #[test]
+    fn after_done_reference_contributes_no_floor_even_with_future_pin() {
+        let mut store = after_store();
+        let reference = store.tasks.get_mut(&id(9)).unwrap();
+        reference.status = TaskStatus::Done;
+        reference.pinned = Some(TimeWindow {
+            start: at(7200),
+            end: at(9000),
+        });
+        let plan = after_plan(&store, &[], ComputeTarget::DesktopOllama).unwrap();
+        assert_eq!(window(&plan, 1).start, at(0));
+        assert!(plan.conflicts.is_empty());
+    }
+
+    #[test]
+    fn after_missing_hidden_active_and_deferred_references_conflict() {
+        for mode in ["missing", "hidden", "active", "deferred"] {
+            let mut store = after_store();
+            store.tasks.get_mut(&id(1)).unwrap().tier = Tier::SemiPublic;
+            match mode {
+                "missing" => {
+                    store.tasks.remove(&id(9));
+                }
+                "hidden" => store.tasks.get_mut(&id(9)).unwrap().tier = Tier::TopSecret,
+                "active" => store.tasks.get_mut(&id(9)).unwrap().status = TaskStatus::Active,
+                _ => store.tasks.get_mut(&id(9)).unwrap().status = TaskStatus::Deferred,
+            }
+            let target = if mode == "hidden" {
+                ComputeTarget::HostedLlm
+            } else {
+                ComputeTarget::DesktopOllama
+            };
+            after_conflict(
+                &after_plan(&store, &[], target).unwrap(),
+                "unresolved after-reference",
+            );
+        }
+    }
+
+    #[test]
+    fn after_unplaceable_and_excluded_references_cascade_to_unplaced_conflict() {
+        for excluded in [false, true] {
+            let mut store = after_store();
+            if excluded {
+                store
+                    .tasks
+                    .get_mut(&id(9))
+                    .unwrap()
+                    .after
+                    .push(crate::AfterConstraint {
+                        task_id: id(99),
+                        offset: Duration::zero(),
+                    });
+            } else {
+                store.tasks.get_mut(&id(9)).unwrap().affect_cost = 11;
+            }
+            after_conflict(
+                &after_plan(&store, &[], ComputeTarget::DesktopOllama).unwrap(),
+                "after-reference unplaced",
+            );
+        }
+    }
+
+    #[test]
+    fn after_only_and_mixed_cycles_are_dependency_errors() {
+        for mixed in [false, true] {
+            let mut store = after_store();
+            let reference = store.tasks.get_mut(&id(9)).unwrap();
+            if mixed {
+                reference.blocked_by.push(id(1));
+            } else {
+                reference.after.push(crate::AfterConstraint {
+                    task_id: id(1),
+                    offset: Duration::zero(),
+                });
+            }
+            assert_eq!(
+                after_plan(&store, &[], ComputeTarget::DesktopOllama),
+                Err(CoreError::DependencyCycle {
+                    involved: vec![id(1), id(9)]
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn after_combines_multiple_floors_and_duplicate_dependency_edges() {
+        let mut store = after_store();
+        let mut other = task(8, TaskStatus::Backlog, vec![]);
+        other.pinned = Some(TimeWindow {
+            start: at(0),
+            end: at(7200),
+        });
+        store.upsert_task(other);
+        let successor = store.tasks.get_mut(&id(1)).unwrap();
+        successor.blocked_by = vec![id(9)];
+        successor.after.push(crate::AfterConstraint {
+            task_id: id(8),
+            offset: Duration::minutes(90),
+        });
+        let plan = after_plan(&store, &[], ComputeTarget::DesktopOllama).unwrap();
+        assert_eq!(window(&plan, 1).start, at(12600));
+        store.tasks.get_mut(&id(1)).unwrap().earliest_start = Some(at(13000));
+        let plan = after_plan(&store, &[], ComputeTarget::DesktopOllama).unwrap();
+        assert!(plan.conflicts.is_empty());
+        assert_eq!(window(&plan, 1).start, at(13000));
+    }
+
+    #[test]
+    fn after_signed_offset_keeps_forward_order_and_respects_other_floors() {
+        let mut store = after_store();
+        store.tasks.get_mut(&id(1)).unwrap().after[0].offset = Duration::minutes(-10);
+        let plan = after_plan(&store, &[], ComputeTarget::DesktopOllama).unwrap();
+        // The reference still places first; occupied time prevents overlap.
+        assert_eq!(window(&plan, 1).start, window(&plan, 9).end);
+    }
+
+    #[test]
+    fn after_offset_datetime_overflow_conflicts_instead_of_panicking() {
+        for pinned in [false, true] {
+            let mut store = after_store();
+            store.tasks.get_mut(&id(1)).unwrap().after[0].offset = Duration::MAX;
+            if pinned {
+                store.tasks.get_mut(&id(9)).unwrap().pinned = Some(TimeWindow {
+                    start: at(0),
+                    end: at(1800),
+                });
+            }
+            after_conflict(
+                &after_plan(&store, &[], ComputeTarget::DesktopOllama).unwrap(),
+                "after-reference offset out of range",
+            );
+        }
+    }
+
     fn plan_with_predecessor_status(status: TaskStatus) -> Plan {
         let mut store = Store::new();
         store.upsert_task(task(1, status, Vec::new()));

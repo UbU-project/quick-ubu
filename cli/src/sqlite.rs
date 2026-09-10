@@ -346,9 +346,22 @@ mod tests {
                 commitment: None,
             },
         );
+        store
+            .tasks
+            .get_mut(&id(2))
+            .unwrap()
+            .after
+            .push(ubu_core::AfterConstraint {
+                task_id: id(5),
+                offset: Duration::minutes(60),
+            });
         let routines: Vec<RoutineTemplate> =
             serde_json::from_str(include_str!("../../docs/example-routine.json")).unwrap();
-        for routine in routines {
+        for mut routine in routines {
+            routine.after.push(ubu_core::RoutineAfter {
+                template_id: id(999),
+                offset: Duration::minutes(30),
+            });
             store.routines.insert(routine.id, routine);
         }
         for n in [3, 4] {

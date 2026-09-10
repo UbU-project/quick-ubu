@@ -5,7 +5,8 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use ollama_planner::LlmTransport;
 use serde_json::{json, Value};
 use ubu_core::{
-    next_task, re_plan, resolve_preferences, validate_temporal_dependencies, AfterConstraint, AffectBudget, Bundle, ComputeTarget,
+    next_task, re_plan, resolve_preferences, validate_temporal_dependencies, AfterConstraint,
+    AffectBudget, Bundle, ComputeTarget,
     CoreError, DecisionRecord, DecisionSource, DeferPolicy, DeterministicPlacer, Id, Objective,
     ObjectiveStatus, PendingDecision, Plan, Planner, PrefSuggestion, Preference, Proposal,
     Provenance, Relation, Resolution, Store, Task, TaskStatus, Tier, TimeWindow,
@@ -608,11 +609,18 @@ pub fn after_add(
         .ok_or_else(|| "after offset minutes are out of range".to_string())?;
     let mut after = store.tasks[&task_id].after.clone();
     after.retain(|reference| reference.task_id != reference_id);
-    after.push(AfterConstraint { task_id: reference_id, offset });
+    after.push(AfterConstraint {
+        task_id: reference_id,
+        offset,
+    });
     commit_after(store, task_id, after)
 }
 
-pub fn after_rm(store: &mut Store, task_prefix: &str, reference_prefix: &str) -> Result<(), String> {
+pub fn after_rm(
+    store: &mut Store,
+    task_prefix: &str,
+    reference_prefix: &str,
+) -> Result<(), String> {
     let task_id = resolve_task_id(store, task_prefix)?;
     let reference_id = resolve_task_id(store, reference_prefix)?;
     let mut after = store.tasks[&task_id].after.clone();
@@ -623,21 +631,41 @@ pub fn after_rm(store: &mut Store, task_prefix: &str, reference_prefix: &str) ->
 pub fn after_list(store: &Store, task_prefix: Option<String>) -> Result<Vec<String>, String> {
     let tasks = match task_prefix {
         Some(prefix) => vec![resolve_task_id(store, &prefix)?],
-        None => store.tasks.values().filter(|task| !task.after.is_empty())
-            .map(|task| task.id).collect(),
+        None => store
+            .tasks
+            .values()
+            .filter(|task| !task.after.is_empty())
+            .map(|task| task.id)
+            .collect(),
     };
-    Ok(tasks.into_iter().map(|id| {
-        let task = &store.tasks[&id];
-        let references = task.after.iter().map(|reference| format!("{}: {}m",
-            short_task_id(reference.task_id), reference.offset.num_minutes()))
-            .collect::<Vec<_>>().join(", ");
-        format!("{}  {}  [{}]", short_task_id(id), task.title, references)
-    }).collect())
+    Ok(tasks
+        .into_iter()
+        .map(|id| {
+            let task = &store.tasks[&id];
+            let references = task
+                .after
+                .iter()
+                .map(|reference| {
+                    format!(
+                        "{}: {}m",
+                        short_task_id(reference.task_id),
+                        reference.offset.num_minutes()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}  {}  [{}]", short_task_id(id), task.title, references)
+        })
+        .collect())
 }
 
 fn commit_after(store: &mut Store, task_id: Id, after: Vec<AfterConstraint>) -> Result<(), String> {
     let mut proposed = store.clone();
-    proposed.tasks.get_mut(&task_id).expect("resolved task").after = after.clone();
+    proposed
+        .tasks
+        .get_mut(&task_id)
+        .expect("resolved task")
+        .after = after.clone();
     validate_dependencies(&proposed)?;
     store.tasks.get_mut(&task_id).expect("resolved task").after = after;
     Ok(())
@@ -1178,6 +1206,92 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+
+    #[test]
+    fn after_add_replaces_offsets_and_remove_and_list_are_deterministic() {
+        let (a, b, c) = graph_ids();
+        let mut store = graph_store();
+        after_add(&mut store, &prefix(a), &prefix(b), 60).unwrap();
+        after_add(&mut store, &prefix(a), &prefix(b), 30).unwrap();
+        assert_eq!(
+            store.tasks[&a].after,
+            vec![AfterConstraint {
+                task_id: b,
+                offset: Duration::minutes(30)
+            }]
+        );
+        assert_eq!(
+            after_list(&store, None).unwrap(),
+            vec![format!(
+                "{}  {}  [{}: 30m]",
+                short_task_id(a),
+                store.tasks[&a].title,
+                short_task_id(b)
+            )]
+        );
+        assert_eq!(
+            after_list(&store, Some(prefix(c))).unwrap(),
+            vec![format!(
+                "{}  {}  []",
+                short_task_id(c),
+                store.tasks[&c].title
+            )]
+        );
+        after_rm(&mut store, &prefix(a), &prefix(b)).unwrap();
+        after_rm(&mut store, &prefix(a), &prefix(b)).unwrap();
+        assert!(after_list(&store, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn after_add_rejects_after_and_mixed_cycles_without_mutation() {
+        let (a, b, _) = graph_ids();
+        for mixed in [false, true] {
+            let mut store = graph_store();
+            if mixed {
+                dep_add(&mut store, &prefix(a), &prefix(b)).unwrap();
+            } else {
+                after_add(&mut store, &prefix(a), &prefix(b), 60).unwrap();
+            }
+            let before = store.clone();
+            assert!(after_add(&mut store, &prefix(b), &prefix(a), 30)
+                .unwrap_err()
+                .contains("dependency cycle"));
+            assert_eq!(store, before);
+        }
+        let mut store = graph_store();
+        after_add(&mut store, &prefix(a), &prefix(b), 60).unwrap();
+        let before = store.clone();
+        assert!(dep_add(&mut store, &prefix(b), &prefix(a))
+            .unwrap_err()
+            .contains("dependency cycle"));
+        assert_eq!(store, before);
+        assert!(dep_set(&mut store, &prefix(b), vec![prefix(a)])
+            .unwrap_err()
+            .contains("dependency cycle"));
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn after_edit_errors_are_atomic_and_signed_offsets_are_supported() {
+        let (a, b, _) = graph_ids();
+        let mut store = graph_store();
+        let before = store.clone();
+        for (task, reference, offset) in [
+            (prefix(a), prefix(a), 60),
+            ("missing".into(), prefix(b), 60),
+            (prefix(a), "missing".into(), 60),
+            (prefix(a), prefix(b), i64::MAX),
+            (prefix(a), prefix(b), i64::MIN),
+        ] {
+            assert!(after_add(&mut store, &task, &reference, offset).is_err());
+            assert_eq!(store, before);
+        }
+        assert!(after_rm(&mut store, &prefix(a), "missing").is_err());
+        assert_eq!(store, before);
+        assert!(after_list(&store, Some("missing".into())).is_err());
+        after_add(&mut store, &prefix(a), &prefix(b), -10).unwrap();
+        assert_eq!(store.tasks[&a].after[0].offset, Duration::minutes(-10));
+    }
 
     #[test]
     fn done_sets_status_and_appends_exactly_one_actual_at_injected_now() {

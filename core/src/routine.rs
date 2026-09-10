@@ -8,7 +8,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::store::Store;
-use crate::types::{AfterConstraint, DeferPolicy, Id, Provenance, Task, TaskStatus, Tier, TimeWindow};
+use crate::types::{
+    AfterConstraint, DeferPolicy, Id, Provenance, Task, TaskStatus, Tier, TimeWindow,
+};
 
 const NAMESPACE: Uuid = Uuid::from_u128(0x6f51_89f1_6208_5c1e_a8ec_15c0f894ea9d);
 
@@ -155,13 +157,17 @@ pub fn expand_routine(
                 pinned: Some(TimeWindow { start, end }),
                 transparent: template.transparent,
                 blocked_by: Vec::new(),
-                after: template.after.iter().map(|reference| AfterConstraint {
-                    task_id: Uuid::new_v5(
-                        &NAMESPACE,
-                        format!("{}|{}", reference.template_id, date).as_bytes(),
-                    ),
-                    offset: reference.offset,
-                }).collect(),
+                after: template
+                    .after
+                    .iter()
+                    .map(|reference| AfterConstraint {
+                        task_id: Uuid::new_v5(
+                            &NAMESPACE,
+                            format!("{}|{}", reference.template_id, date).as_bytes(),
+                        ),
+                        offset: reference.offset,
+                    })
+                    .collect(),
                 defer_policy: DeferPolicy::RescheduleAsap,
                 status: TaskStatus::Scheduled,
                 provenance: Provenance::Manual,
@@ -277,6 +283,92 @@ mod tests {
     }
 
     #[test]
+    fn routine_after_resolves_same_day_ids_across_days_and_dst() {
+        let first = template(1, Recurrence::Daily);
+        let mut second = template(2, Recurrence::Daily);
+        second.after.push(RoutineAfter {
+            template_id: first.id,
+            offset: Duration::hours(1),
+        });
+        let tasks = expand_routine(
+            &[first.clone(), second.clone()],
+            date(2026, 10, 31),
+            3,
+            chrono_tz::America::New_York,
+        );
+        for day in 0..3 {
+            let on = date(2026, 10, 31) + Days::new(day);
+            let first_id = Uuid::new_v5(&NAMESPACE, format!("{}|{}", first.id, on).as_bytes());
+            let second_id = Uuid::new_v5(&NAMESPACE, format!("{}|{}", second.id, on).as_bytes());
+            assert!(tasks.iter().any(|task| task.id == first_id));
+            let task = tasks.iter().find(|task| task.id == second_id).unwrap();
+            assert_eq!(
+                task.after,
+                vec![AfterConstraint {
+                    task_id: first_id,
+                    offset: Duration::hours(1)
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn routine_after_preserves_nonfiring_reference_for_dynamic_planning_conflict() {
+        let first = template(
+            1,
+            Recurrence::MonthlyDay {
+                days: [2].into_iter().collect(),
+            },
+        );
+        let mut second = template(2, Recurrence::Daily);
+        second.after.push(RoutineAfter {
+            template_id: first.id,
+            offset: Duration::minutes(60),
+        });
+        let mut tasks = expand_routine(&[first, second], date(2026, 9, 1), 1, chrono_tz::UTC);
+        assert_eq!(tasks.len(), 1);
+        let mut task = tasks.remove(0);
+        let task_id = task.id;
+        // Generation retains its pinned contract; after applies once the task is dynamic.
+        task.pinned = None;
+        let mut store = Store::new();
+        store.upsert_task(task);
+        let now = date(2026, 9, 1).and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let plan = crate::re_plan(
+            &store,
+            crate::ComputeTarget::DesktopOllama,
+            now,
+            now,
+            &[],
+            &crate::AffectBudget { cap: 100 },
+            &crate::DeterministicPlacer,
+        )
+        .unwrap();
+        assert!(plan.entries.is_empty());
+        assert_eq!(
+            plan.conflicts,
+            vec![crate::Conflict {
+                item: task_id,
+                reason: "unresolved after-reference".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn legacy_task_and_routine_json_default_after_to_empty() {
+        let mut store = Store::new();
+        store.upsert_routine(template(1, Recurrence::Daily));
+        generate_routine_tasks(&mut store, date(2026, 9, 1), 1, chrono_tz::UTC);
+        let mut value = serde_json::to_value(&store).unwrap();
+        for collection in ["tasks", "routines"] {
+            for record in value[collection].as_object_mut().unwrap().values_mut() {
+                record.as_object_mut().unwrap().remove("after");
+            }
+        }
+        assert_eq!(serde_json::from_value::<Store>(value).unwrap(), store);
+    }
+
+    #[test]
     fn monthly_first_workday_handles_saturday_sunday_and_weekday_starts() {
         for (year, month, expected_day) in [(2026, 8, 3), (2026, 11, 2), (2026, 9, 1)] {
             let expected = date(year, month, expected_day);
@@ -378,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_canonical_routine_example() {
+    fn canonical_routine_example_matches_templates_and_round_trips() {
         let mut daily = template(1, Recurrence::Daily);
         daily.title = "Daily check-in".to_string();
         daily.duration = Duration::minutes(10);
@@ -401,14 +493,15 @@ mod tests {
         quarterly.duration = Duration::minutes(60);
         let routines = vec![daily, weekly, monthly, quarterly];
         let json = serde_json::to_string_pretty(&routines).unwrap() + "\n";
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/example-routine.json");
-        // This test deliberately regenerates the committed wire-format example.
-        std::fs::write(&path, &json).expect("canonical example must be writable");
-        let saved = std::fs::read_to_string(path).unwrap();
-        assert_eq!(saved, json);
+        // Compare the checked-in legacy fixture by value: new defaulted fields
+        // need not be written into the source tree just to run the tests.
+        let saved = include_str!("../../docs/example-routine.json");
         assert_eq!(
-            serde_json::from_str::<Vec<RoutineTemplate>>(&saved).unwrap(),
+            serde_json::from_str::<Vec<RoutineTemplate>>(saved).unwrap(),
+            routines
+        );
+        assert_eq!(
+            serde_json::from_str::<Vec<RoutineTemplate>>(&json).unwrap(),
             routines
         );
     }

@@ -721,3 +721,96 @@ fn generate_blocks_daily_routines_before_launch_using_local_dates() {
     );
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn after_commands_persist_list_replan_and_remove_with_atomic_rejection() {
+    let (directory, path) = memory_store();
+    for title in ["First", "Second"] {
+        assert_success(&quick_ubu(
+            &path,
+            &["add", "--title", title, "--duration", "30"],
+        ));
+    }
+    let loaded: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let first = loaded
+        .tasks
+        .values()
+        .find(|task| task.title == "First")
+        .unwrap()
+        .id;
+    let second = loaded
+        .tasks
+        .values()
+        .find(|task| task.title == "Second")
+        .unwrap()
+        .id;
+    let first_arg = first.to_string();
+    let second_arg = second.to_string();
+    for offset in ["30", "60", "-10", "60"] {
+        assert_success(&quick_ubu(
+            &path,
+            &["after-add", &second_arg, &first_arg, offset],
+        ));
+    }
+    let before = fs::read_to_string(&path).unwrap();
+    let store: Store = serde_json::from_str(&before).unwrap();
+    assert_eq!(
+        store.tasks[&second].after,
+        vec![ubu_core::AfterConstraint {
+            task_id: first,
+            offset: Duration::minutes(60)
+        }]
+    );
+    for args in [vec!["after-list"], vec!["after-list", &second_arg]] {
+        let output = quick_ubu(&path, &args);
+        assert_success(&output);
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("Second"));
+        assert!(text.contains(": 60m"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+    for args in [
+        vec!["after-add", &first_arg, &second_arg, "30"],
+        vec!["dep-add", &first_arg, &second_arg],
+        vec!["after-add", &second_arg, &first_arg, "invalid"],
+        vec!["after-add", &second_arg, &first_arg, "9223372036854775807"],
+    ] {
+        let output = quick_ubu(&path, &args);
+        assert!(!output.status.success());
+        assert!(!output.stderr.is_empty());
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+    let now = "2026-09-11T00:00:00Z".parse().unwrap();
+    let plan = ubu_core::re_plan(
+        &store,
+        ubu_core::ComputeTarget::DesktopOllama,
+        now,
+        now,
+        &[],
+        &ubu_core::AffectBudget { cap: 100 },
+        &ubu_core::DeterministicPlacer,
+    )
+    .unwrap();
+    let first_end = plan
+        .entries
+        .iter()
+        .find(|entry| entry.item == first)
+        .unwrap()
+        .window
+        .end;
+    let second_start = plan
+        .entries
+        .iter()
+        .find(|entry| entry.item == second)
+        .unwrap()
+        .window
+        .start;
+    assert_eq!(second_start, first_end + Duration::minutes(60));
+    assert_success(&quick_ubu(&path, &["after-rm", &second_arg, &first_arg]));
+    let loaded: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(loaded.tasks[&second].after.is_empty());
+    let output = quick_ubu(&path, &["after-list"]);
+    assert_success(&output);
+    assert!(output.stdout.is_empty());
+    fs::remove_dir_all(directory).unwrap();
+}
