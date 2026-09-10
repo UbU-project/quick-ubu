@@ -1,15 +1,211 @@
 use super::stub_tests::{at, fetched_event, id, task};
 use super::*;
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::thread;
-use std::time::{Duration as StdDuration, Instant};
 
 fn linked_store() -> Store {
     let mut store = Store::new();
     store.upsert_task(task(1, "Dynamic", Tier::UserShared, false, None));
     store.upsert_calendar_link(id(1), "dynamic".into());
     store
+}
+
+#[tokio::test]
+async fn confirmed_deleted_pinned_instance_is_removed_without_changing_its_routine() {
+    let mut store = Store::new();
+    let routine = ubu_core::RoutineTemplate {
+        id: id(10),
+        title: "Daily".into(),
+        tier: Tier::UserShared,
+        start_time: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+        duration: Duration::minutes(30),
+        affect_cost: 0,
+        category: None,
+        transparent: false,
+        reminders: vec![],
+        recurrence: ubu_core::Recurrence::Daily,
+    };
+    store.upsert_routine(routine.clone());
+    ubu_core::generate_routine_tasks(&mut store, at(0).date_naive(), 1, ubu_core::Tz::UTC);
+    let task_id = *store.tasks.keys().next().unwrap();
+    store.upsert_calendar_link(task_id, "pinned".into());
+    store.export_signatures.insert(task_id, "signature".into());
+    let transport = StubTransport::default();
+    let fetched = fetch_import_events(
+        &store,
+        &transport,
+        &calendar_import_window(at(0), None, None).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(fetched.events.is_empty());
+    assert_eq!(fetched.deleted, vec![task_id]);
+    assert_eq!(*transport.get_calls.borrow(), vec!["pinned"]);
+    assert!(store.tasks.contains_key(&task_id)); // Fetch does not mutate the store.
+    let report = import_from_calendar(
+        &mut store,
+        &fetched.events,
+        &fetched.deleted,
+        at(0),
+        Tier::UserShared,
+        &BTreeMap::new(),
+    );
+    assert_eq!(report.removed, 1);
+    assert!(!store.tasks.contains_key(&task_id));
+    assert!(!store.calendar_links.contains_key(&task_id));
+    assert!(!store.export_signatures.contains_key(&task_id));
+    assert_eq!(store.routines[&routine.id], routine);
+    assert_eq!(store.log.len(), 1);
+    assert_eq!(
+        store.log[0].kind,
+        LogEntryKind::Command(ubu_core::CommandKind::RemoveTask { task_id })
+    );
+    assert_eq!(store.log[0].at, at(0));
+    let generated =
+        ubu_core::generate_routine_tasks(&mut store, at(0).date_naive(), 1, ubu_core::Tz::UTC);
+    assert_eq!(generated.created, 1);
+    assert!(store.tasks.contains_key(&task_id));
+    assert_eq!(store.routines[&routine.id], routine);
+}
+
+#[tokio::test]
+async fn confirmed_deleted_dynamic_task_is_removed_and_reimport_is_a_noop() {
+    let mut store = linked_store();
+    store.export_signatures.insert(id(1), "signature".into());
+    let transport = StubTransport::default();
+    let window = calendar_import_window(at(0), None, None).unwrap();
+    let fetched = fetch_import_events(&store, &transport, &window)
+        .await
+        .unwrap();
+    assert_eq!(fetched.deleted, vec![id(1)]);
+    assert_eq!(*transport.get_calls.borrow(), vec!["dynamic"]);
+    let report = import_from_calendar(
+        &mut store,
+        &fetched.events,
+        &fetched.deleted,
+        at(0),
+        Tier::UserShared,
+        &BTreeMap::new(),
+    );
+    assert_eq!(report.removed, 1);
+    assert!(
+        store.tasks.is_empty()
+            && store.calendar_links.is_empty()
+            && store.export_signatures.is_empty()
+    );
+    assert!(
+        matches!(store.log[0].kind, LogEntryKind::Command(ubu_core::CommandKind::RemoveTask { task_id }) if task_id == id(1))
+    );
+    let removed = store.clone();
+    let report = import_from_calendar(
+        &mut store,
+        &[],
+        &fetched.deleted,
+        at(1),
+        Tier::UserShared,
+        &BTreeMap::new(),
+    );
+    assert_eq!(report.removed, 0);
+    assert_eq!(store, removed);
+}
+
+#[tokio::test]
+async fn list_absence_with_a_successful_per_id_fetch_processes_moved_tasks_without_removal() {
+    for pinned in [false, true] {
+        let mut store = Store::new();
+        store.upsert_task(task(1, "Moved", Tier::UserShared, pinned, None));
+        store.upsert_calendar_link(id(1), "moved".into());
+        let event = fetched_event("moved", "Moved", None, 60_000, 60_090);
+        let transport = StubTransport {
+            filter_dates: true,
+            listed_events: vec![event.clone()],
+            ..StubTransport::default()
+        };
+        let window = calendar_import_window(at(0), None, None).unwrap();
+        assert!(transport
+            .list_events(window.start, window.end)
+            .await
+            .unwrap()
+            .is_empty());
+        let fetched = fetch_import_events(&store, &transport, &window)
+            .await
+            .unwrap();
+        assert!(fetched.deleted.is_empty());
+        assert_eq!(fetched.events, vec![event.clone()]);
+        assert_eq!(*transport.get_calls.borrow(), vec!["moved"]);
+        let report = import_from_calendar(
+            &mut store,
+            &fetched.events,
+            &fetched.deleted,
+            at(0),
+            Tier::UserShared,
+            &BTreeMap::new(),
+        );
+        assert_eq!(report.removed, 0);
+        assert_eq!(report.moved, usize::from(pinned));
+        assert_eq!(report.resized, usize::from(!pinned));
+        assert!(store.tasks.contains_key(&id(1)));
+        assert_eq!(store.calendar_links[&id(1)], "moved");
+        if pinned {
+            assert_eq!(
+                store.tasks[&id(1)].pinned,
+                Some(TimeWindow {
+                    start: event.start,
+                    end: event.end
+                })
+            );
+        } else {
+            assert_eq!(store.tasks[&id(1)].est_duration, Duration::minutes(90));
+        }
+    }
+}
+
+#[tokio::test]
+async fn deletion_detection_skips_done_tasks_and_links_without_tasks() {
+    let mut store = linked_store();
+    store.tasks.get_mut(&id(1)).unwrap().status = TaskStatus::Done;
+    let mut pinned = task(2, "Done pin", Tier::UserShared, true, None);
+    pinned.status = TaskStatus::Done;
+    store.upsert_task(pinned);
+    store.upsert_calendar_link(id(2), "done-pin".into());
+    store.upsert_calendar_link(id(99), "orphan".into());
+    let before = store.clone();
+    let transport = StubTransport::default();
+    let fetched = fetch_import_events(
+        &store,
+        &transport,
+        &calendar_import_window(at(0), None, None).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(fetched.deleted.is_empty());
+    assert!(transport.get_calls.borrow().is_empty());
+    assert_eq!(
+        import_from_calendar(
+            &mut store,
+            &fetched.events,
+            &fetched.deleted,
+            at(0),
+            Tier::UserShared,
+            &BTreeMap::new()
+        )
+        .removed,
+        0
+    );
+    assert_eq!(store, before);
+}
+
+#[test]
+fn duplicate_deleted_ids_produce_one_removal_and_unknown_ids_are_ignored() {
+    let mut store = linked_store();
+    let report = import_from_calendar(
+        &mut store,
+        &[],
+        &[id(1), id(1), id(99)],
+        at(0),
+        Tier::UserShared,
+        &BTreeMap::new(),
+    );
+    assert_eq!(report.removed, 1);
+    assert_eq!(store.log.len(), 1);
 }
 
 fn import(store: &mut Store, event: &FetchedEvent, now: DateTime<Utc>) -> ImportReport {
@@ -70,7 +266,8 @@ async fn linked_unfinished_events_are_imported_regardless_of_date() {
         let window = calendar_import_window(at(0), None, None).unwrap();
         let events = fetch_import_events(&store, &transport, &window)
             .await
-            .unwrap().events;
+            .unwrap()
+            .events;
         assert_eq!(events, vec![event.clone()]);
         assert_eq!(*transport.get_calls.borrow(), vec!["dynamic"]);
         let report = import_from_calendar(
@@ -133,7 +330,8 @@ async fn import_discovers_unlinked_events_beyond_the_old_seven_day_window() {
     let window = calendar_import_window(at(0), None, None).unwrap();
     let events = fetch_import_events(&store, &transport, &window)
         .await
-        .unwrap().events;
+        .unwrap()
+        .events;
     assert_eq!(events, vec![upcoming]);
     let report = import_from_calendar(
         &mut store,
@@ -165,7 +363,8 @@ async fn discovery_includes_recent_completions_and_deduplicates_linked_events() 
     let window = calendar_import_window(at(0), Some(at(0)), None).unwrap();
     let events = fetch_import_events(&store, &transport, &window)
         .await
-        .unwrap().events;
+        .unwrap()
+        .events;
     assert_eq!(events.len(), 2);
     assert!(events.contains(&recent));
     assert_eq!(*transport.get_calls.borrow(), vec!["pinned-outside"]);
@@ -174,9 +373,13 @@ async fn discovery_includes_recent_completions_and_deduplicates_linked_events() 
     let old_transport = StubTransport::default();
     let events = fetch_import_events(&store, &old_transport, &window)
         .await
-        .unwrap().events;
+        .unwrap()
+        .events;
     assert!(events.is_empty());
-    assert_eq!(*old_transport.get_calls.borrow(), vec!["pending", "pinned-outside"]);
+    assert_eq!(
+        *old_transport.get_calls.borrow(),
+        vec!["pending", "pinned-outside"]
+    );
 }
 
 #[tokio::test]
@@ -288,12 +491,12 @@ fn undo_uses_the_event_end_time_and_does_not_undo_cli_done() {
     assert_eq!(store.tasks[&id(1)].status, TaskStatus::Done);
 }
 
-// Exercise the actual reqwest pagination/parsing path without credentials or
-// external network access. Each response closes its connection for simplicity.
-fn http_server(
+// Exercise request construction, response parsing, and pagination entirely in
+// memory. No sockets, credentials, or real HTTP requests are used.
+fn stub_responses(
     responses: Vec<(u16, serde_json::Value)>,
-) -> (reqwest::Url, thread::JoinHandle<Vec<String>>) {
-    raw_http_server(
+) -> (reqwest::Url, GoogleCalendarTransport) {
+    raw_stub_responses(
         responses
             .into_iter()
             .map(|(status, body)| (status, body.to_string()))
@@ -301,45 +504,17 @@ fn http_server(
     )
 }
 
-fn raw_http_server(
-    responses: Vec<(u16, String)>,
-) -> (reqwest::Url, thread::JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let url =
-        reqwest::Url::parse(&format!("http://{}/events", listener.local_addr().unwrap())).unwrap();
-    let handle = thread::spawn(move || {
-        let deadline = Instant::now() + StdDuration::from_secs(10);
-        let mut requests = Vec::new();
-        for (status, body) in responses {
-            let mut socket = loop {
-                match listener.accept() {
-                    Ok((socket, _)) => break socket,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(
-                            Instant::now() < deadline,
-                            "timed out waiting for HTTP request"
-                        );
-                        thread::sleep(StdDuration::from_millis(5));
-                    }
-                    Err(error) => panic!("accept failed: {error}"),
-                }
-            };
-            socket
-                .set_read_timeout(Some(StdDuration::from_secs(5)))
-                .unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                socket.read_exact(&mut byte).unwrap();
-                request.push(byte[0]);
-            }
-            requests.push(String::from_utf8(request).unwrap());
-            write!(socket, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-        }
-        requests
-    });
-    (url, handle)
+fn raw_stub_responses(responses: Vec<(u16, String)>) -> (reqwest::Url, GoogleCalendarTransport) {
+    let transport = GoogleCalendarTransport::new("unused", "unused", "primary");
+    transport
+        .import_stub
+        .import_responses
+        .borrow_mut()
+        .extend(responses);
+    (
+        reqwest::Url::parse("https://calendar.invalid/events").unwrap(),
+        transport,
+    )
 }
 
 fn google_event(event_id: &str) -> serde_json::Value {
@@ -365,14 +540,13 @@ fn events_without_date_times() -> Vec<serde_json::Value> {
 async fn import_skips_untimed_events_and_continues_through_pages() {
     let mut mixed = events_without_date_times();
     mixed.push(google_event("dynamic"));
-    let (url, server) = http_server(vec![
+    let (url, transport) = stub_responses(vec![
         (
             200,
             serde_json::json!({ "items": events_without_date_times(), "nextPageToken": "next" }),
         ),
         (200, serde_json::json!({ "items": mixed })),
     ]);
-    let transport = GoogleCalendarTransport::new("unused", "unused", "primary");
     let events = transport
         .list_events_with_token(url, "test-token", at(-1440), at(10080))
         .await
@@ -392,7 +566,7 @@ async fn import_skips_untimed_events_and_continues_through_pages() {
     assert_eq!(report.completed, 1);
     assert_eq!(store.tasks.len(), 1);
     assert_eq!(store.tasks[&id(1)].status, TaskStatus::Done);
-    assert_eq!(server.join().unwrap().len(), 2);
+    assert_eq!(transport.import_stub.import_requests.borrow().len(), 2);
 }
 
 #[tokio::test]
@@ -402,8 +576,7 @@ async fn linked_fetch_skips_untimed_events_but_rejects_invalid_timestamps() {
     let mut invalid = google_event("invalid");
     invalid["start"]["dateTime"] = serde_json::json!("not a timestamp");
     responses.push((200, invalid));
-    let (url, server) = http_server(responses);
-    let transport = GoogleCalendarTransport::new("unused", "unused", "primary");
+    let (url, transport) = stub_responses(responses);
     for _ in &fixtures {
         assert!(transport
             .get_event_with_token(url.clone(), "test-token")
@@ -416,7 +589,10 @@ async fn linked_fetch_skips_untimed_events_but_rejects_invalid_timestamps() {
         .await
         .unwrap_err()
         .contains("invalid Google Calendar start dateTime"));
-    assert_eq!(server.join().unwrap().len(), fixtures.len() + 1);
+    assert_eq!(
+        transport.import_stub.import_requests.borrow().len(),
+        fixtures.len() + 1
+    );
 }
 
 #[tokio::test]
@@ -430,11 +606,10 @@ async fn list_parse_errors_include_the_entire_failing_page_body() {
             "Calendar café 🌎 ".repeat(1000)
         ),
     ] {
-        let (url, server) = raw_http_server(vec![
+        let (url, transport) = raw_stub_responses(vec![
             (200, "{\"items\": [], \"nextPageToken\": \"next\"}".into()),
             (200, body.clone()),
         ]);
-        let transport = GoogleCalendarTransport::new("unused", "unused", "primary");
         let error = transport
             .list_events_with_token(url, "test-token", at(-1440), at(10080))
             .await
@@ -442,15 +617,14 @@ async fn list_parse_errors_include_the_entire_failing_page_body() {
         assert!(error.starts_with("failed to parse Google Calendar events: "));
         assert_eq!(error.split_once("\nResponse body:\n").unwrap().1, body);
         assert!(!error.contains("test-token"));
-        assert_eq!(server.join().unwrap().len(), 2);
+        assert_eq!(transport.import_stub.import_requests.borrow().len(), 2);
     }
 }
 
 #[tokio::test]
 async fn linked_event_parse_errors_include_the_entire_body_and_schema_error() {
     let body = "{\n  \"id\": \"invalid\", \"start\": {\"dateTime\": 123}\n}\n";
-    let (url, server) = raw_http_server(vec![(200, body.into())]);
-    let transport = GoogleCalendarTransport::new("unused", "unused", "primary");
+    let (url, transport) = raw_stub_responses(vec![(200, body.into())]);
     let error = transport
         .get_event_with_token(url, "test-token")
         .await
@@ -458,12 +632,12 @@ async fn linked_event_parse_errors_include_the_entire_body_and_schema_error() {
     assert!(error.starts_with("failed to parse Google Calendar event: "));
     assert!(error.contains("invalid type: integer `123`, expected a string"));
     assert_eq!(error.split_once("\nResponse body:\n").unwrap().1, body);
-    assert_eq!(server.join().unwrap().len(), 1);
+    assert_eq!(transport.import_stub.import_requests.borrow().len(), 1);
 }
 
 #[tokio::test]
 async fn pagination_imports_completion_on_a_later_page_even_after_an_empty_page() {
-    let (url, server) = http_server(vec![
+    let (url, transport) = stub_responses(vec![
         (
             200,
             serde_json::json!({ "items": [google_event("first")], "nextPageToken": "second +/=" }),
@@ -477,23 +651,14 @@ async fn pagination_imports_completion_on_a_later_page_even_after_an_empty_page(
             serde_json::json!({ "items": [google_event("dynamic")] }),
         ),
     ]);
-    let transport = GoogleCalendarTransport::new("unused", "unused", "primary");
     let events = transport
         .list_events_with_token(url, "test-token", at(-1440), at(10080))
         .await
         .unwrap();
-    let requests = server.join().unwrap();
+    let requests = transport.import_stub.import_requests.borrow();
     assert_eq!(events.len(), 2);
     for (index, request) in requests.iter().enumerate() {
-        let target = request
-            .lines()
-            .next()
-            .unwrap()
-            .split_whitespace()
-            .nth(1)
-            .unwrap();
-        let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
-        let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        let query: BTreeMap<_, _> = request.url().query_pairs().into_owned().collect();
         assert_eq!(query["timeMin"], at(-1440).to_rfc3339());
         assert_eq!(query["timeMax"], at(10080).to_rfc3339());
         assert_eq!(query["singleEvents"], "true");
@@ -521,25 +686,24 @@ async fn pagination_errors_do_not_return_partial_results() {
         (503, serde_json::json!({ "error": "unavailable" })),
         (200, serde_json::json!({ "nextPageToken": "again" })),
     ] {
-        let (url, server) = http_server(vec![
+        let (url, transport) = stub_responses(vec![
             (
                 200,
                 serde_json::json!({ "items": [google_event("dynamic")], "nextPageToken": "again" }),
             ),
             second_page,
         ]);
-        let transport = GoogleCalendarTransport::new("unused", "unused", "primary");
         assert!(transport
             .list_events_with_token(url, "test-token", at(-1440), at(10080))
             .await
             .is_err());
-        assert_eq!(server.join().unwrap().len(), 2);
+        assert_eq!(transport.import_stub.import_requests.borrow().len(), 2);
     }
 }
 
 #[tokio::test]
 async fn get_event_handles_past_events_deletions_and_errors() {
-    let (url, server) = http_server(vec![
+    let (url, transport) = stub_responses(vec![
         (200, google_event("dynamic")),
         (404, serde_json::json!({})),
         (410, serde_json::json!({})),
@@ -549,7 +713,6 @@ async fn get_event_handles_past_events_deletions_and_errors() {
         ),
         (403, serde_json::json!({ "error": "forbidden" })),
     ]);
-    let transport = GoogleCalendarTransport::new("unused", "unused", "primary");
     let event = transport
         .get_event_with_token(url.clone(), "test-token")
         .await
@@ -568,9 +731,12 @@ async fn get_event_handles_past_events_deletions_and_errors() {
         .await
         .unwrap_err()
         .contains("403"));
-    assert!(server
-        .join()
-        .unwrap()
+    assert!(transport
+        .import_stub
+        .import_requests
+        .borrow()
         .iter()
-        .all(|request| request.starts_with("GET /events HTTP/1.1\r\n")));
+        .all(|request| request.method() == reqwest::Method::GET
+            && request.url().path() == "/events"
+            && request.url().query().is_none()));
 }

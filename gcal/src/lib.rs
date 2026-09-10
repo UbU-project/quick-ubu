@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use chrono::{DateTime, Duration, Months, Utc};
 use serde::{Deserialize, Serialize};
 use ubu_core::{
-    log_actual, log_capture, log_edit_duration, log_edit_pin, log_remove_task, log_undo_completion, reconcile,
-    visible_as_content, ActualStatus, DeferPolicy, FactKind, Id, LogEntryKind, Plan, Provenance,
-    Store, Task, TaskStatus, Tier, TimeWindow,
+    log_actual, log_capture, log_edit_duration, log_edit_pin, log_remove_task, log_undo_completion,
+    reconcile, visible_as_content, ActualStatus, DeferPolicy, FactKind, Id, LogEntryKind, Plan,
+    Provenance, Store, Task, TaskStatus, Tier, TimeWindow,
 };
 use yup_oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};
 
@@ -95,13 +95,55 @@ pub trait CalendarTransport {
     async fn get_event(&self, event_id: &str) -> Result<Option<FetchedEvent>, String>;
 }
 
-/// Real Google transport. HTTP handling is tested against a local server;
-/// credentials and OAuth still require verification against Google Calendar.
+/// Real Google transport. Import requests are intercepted by StubTransport in
+/// unit tests; credentials and OAuth require separate live verification.
 pub struct GoogleCalendarTransport {
     credentials_path: PathBuf,
     token_cache_path: PathBuf,
     calendar_id: String,
     client: reqwest::Client,
+    #[cfg(test)]
+    import_stub: StubTransport,
+}
+
+enum ImportResponse {
+    #[cfg(not(test))]
+    Live(reqwest::Response),
+    #[cfg(test)]
+    Stub {
+        status: reqwest::StatusCode,
+        body: Vec<u8>,
+    },
+}
+
+impl ImportResponse {
+    fn status(&self) -> reqwest::StatusCode {
+        match self {
+            #[cfg(not(test))]
+            Self::Live(response) => response.status(),
+            #[cfg(test)]
+            Self::Stub { status, .. } => *status,
+        }
+    }
+
+    async fn bytes(self) -> Result<Vec<u8>, reqwest::Error> {
+        match self {
+            #[cfg(not(test))]
+            Self::Live(response) => response.bytes().await.map(|body| body.to_vec()),
+            #[cfg(test)]
+            Self::Stub { body, .. } => Ok(body),
+        }
+    }
+
+    async fn error(self) -> String {
+        let status = self.status();
+        let body = self
+            .bytes()
+            .await
+            .map(|body| String::from_utf8_lossy(&body).into_owned())
+            .unwrap_or_else(|error| format!("failed to read response body: {error}"));
+        format!("Google Calendar API returned {status}: {body}")
+    }
 }
 
 impl GoogleCalendarTransport {
@@ -115,6 +157,8 @@ impl GoogleCalendarTransport {
             token_cache_path: token_cache_path.into(),
             calendar_id: calendar_id.into(),
             client: reqwest::Client::new(),
+            #[cfg(test)]
+            import_stub: StubTransport::default(),
         }
     }
 
@@ -171,7 +215,7 @@ impl GoogleCalendarTransport {
     }
 
     async fn parse_response<T: serde::de::DeserializeOwned>(
-        response: reqwest::Response,
+        response: ImportResponse,
         resource: &str,
     ) -> Result<T, String> {
         let body = response.bytes().await.map_err(|error| {
@@ -183,6 +227,24 @@ impl GoogleCalendarTransport {
                 String::from_utf8_lossy(&body)
             )
         })
+    }
+
+    async fn send_import_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<ImportResponse, String> {
+        #[cfg(not(test))]
+        {
+            request
+                .send()
+                .await
+                .map(ImportResponse::Live)
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(test)]
+        {
+            self.import_stub.send_import_request(request)
+        }
     }
 
     async fn list_events_with_token(
@@ -209,12 +271,12 @@ impl GoogleCalendarTransport {
             if let Some(page_token) = &page_token {
                 request = request.query(&[("pageToken", page_token)]);
             }
-            let response = request
-                .send()
+            let response = self
+                .send_import_request(request)
                 .await
                 .map_err(|error| format!("failed to list Google Calendar events: {error}"))?;
             if !response.status().is_success() {
-                return Err(Self::response_error(response).await);
+                return Err(response.error().await);
             }
             let page: ListedEvents = Self::parse_response(response, "events").await?;
             for event in page.items {
@@ -238,10 +300,7 @@ impl GoogleCalendarTransport {
         token: &str,
     ) -> Result<Option<FetchedEvent>, String> {
         let response = self
-            .client
-            .get(url)
-            .bearer_auth(token)
-            .send()
+            .send_import_request(self.client.get(url).bearer_auth(token))
             .await
             .map_err(|error| format!("failed to get Google Calendar event: {error}"))?;
         if matches!(
@@ -251,7 +310,7 @@ impl GoogleCalendarTransport {
             return Ok(None);
         }
         if !response.status().is_success() {
-            return Err(Self::response_error(response).await);
+            return Err(response.error().await);
         }
         let event: ListedEvent = Self::parse_response(response, "event").await?;
         if event.status.as_deref() == Some("cancelled") || !event.has_date_times() {
@@ -509,7 +568,10 @@ pub async fn fetch_import_events<T: CalendarTransport>(
             deleted.push(*task_id);
         }
     }
-    Ok(FetchedImport { events: events.into_values().collect(), deleted })
+    Ok(FetchedImport {
+        events: events.into_values().collect(),
+        deleted,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -745,10 +807,30 @@ struct StubTransport {
     filter_dates: bool,
     get_calls: std::cell::RefCell<Vec<String>>,
     get_error: Option<String>,
+    import_responses: std::cell::RefCell<std::collections::VecDeque<(u16, String)>>,
+    import_requests: std::cell::RefCell<Vec<reqwest::Request>>,
 }
 
 #[cfg(test)]
 impl StubTransport {
+    fn send_import_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<ImportResponse, String> {
+        self.import_requests
+            .borrow_mut()
+            .push(request.build().map_err(|error| error.to_string())?);
+        let (status, body) = self
+            .import_responses
+            .borrow_mut()
+            .pop_front()
+            .ok_or("unexpected import request: no stub response configured")?;
+        Ok(ImportResponse::Stub {
+            status: reqwest::StatusCode::from_u16(status).map_err(|error| error.to_string())?,
+            body: body.into_bytes(),
+        })
+    }
+
     fn with_create_error(error: &str) -> Self {
         Self {
             create_error: Some(error.to_string()),
@@ -1897,7 +1979,8 @@ mod stub_tests {
         ];
         let colors = BTreeMap::from([("5".to_string(), "personal".to_string())]);
 
-        let first = import_from_calendar(&mut store, &events, &[], at(0), Tier::UserShared, &colors);
+        let first =
+            import_from_calendar(&mut store, &events, &[], at(0), Tier::UserShared, &colors);
         assert_eq!(
             first,
             ImportReport {
@@ -1911,7 +1994,8 @@ mod stub_tests {
         );
         let after_first = store.clone();
 
-        let second = import_from_calendar(&mut store, &events, &[], at(1), Tier::UserShared, &colors);
+        let second =
+            import_from_calendar(&mut store, &events, &[], at(1), Tier::UserShared, &colors);
 
         assert_eq!(
             second,

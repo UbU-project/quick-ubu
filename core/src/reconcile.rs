@@ -383,6 +383,39 @@ mod tests {
     }
 
     #[test]
+    fn remove_task_cleans_calendar_state_and_is_idempotent() {
+        let task_id = id(1);
+        let mut store = Store::new();
+        store.upsert_task(task(task_id, Tier::UserShared, DeferPolicy::RescheduleAsap));
+        store.upsert_calendar_link(task_id, "event".into());
+        store.export_signatures.insert(task_id, "signature".into());
+        let entry = log_remove_task(task_id, at(1));
+        assert_eq!(entry.at, at(1));
+        assert_eq!(
+            entry.kind,
+            LogEntryKind::Command(CommandKind::RemoveTask { task_id })
+        );
+        let serialized = serde_json::to_string(&entry).unwrap();
+        assert_eq!(
+            serde_json::from_str::<LogEntry>(&serialized).unwrap(),
+            entry
+        );
+        reconcile(&mut store, std::slice::from_ref(&entry)).unwrap();
+        assert!(!store.tasks.contains_key(&task_id));
+        assert!(!store.calendar_links.contains_key(&task_id));
+        assert!(!store.export_signatures.contains_key(&task_id));
+        let removed = store.clone();
+        reconcile(&mut store, &[entry, log_remove_task(id(99), at(2))]).unwrap();
+        assert_eq!(store, removed);
+
+        // Stale metadata is cleaned even when the Task itself is already absent.
+        store.upsert_calendar_link(task_id, "orphan".into());
+        store.export_signatures.insert(task_id, "orphan".into());
+        reconcile(&mut store, &[log_remove_task(task_id, at(3))]).unwrap();
+        assert_eq!(store, removed);
+    }
+
+    #[test]
     fn capture_edits_and_preferences_are_applied() {
         let mut store = Store::new();
         let existing_id = id(1);
