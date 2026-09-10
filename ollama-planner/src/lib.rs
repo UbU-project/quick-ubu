@@ -842,6 +842,7 @@ mod tests {
             earliest_floor: fixed_time(),
             due: None,
             sched_predecessors,
+            after_refs: Vec::new(),
         }
     }
 

@@ -17,6 +17,7 @@ pub struct Placeable {
     pub earliest_floor: DateTime<Utc>,
     pub due: Option<DateTime<Utc>>,
     pub sched_predecessors: Vec<Id>,
+    pub after_refs: Vec<(Id, Duration)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +64,30 @@ impl Planner for DeterministicPlacer {
                 conflicts.push(Conflict {
                     item: item.task_id,
                     reason: "predecessor unplaced".to_string(),
+                });
+                continue;
+            }
+
+            let mut after_error = None;
+            for (reference, offset) in &item.after_refs {
+                match placed_end.get(reference) {
+                    Some(end) => match end.checked_add_signed(*offset) {
+                        Some(floor) => start_floor = start_floor.max(floor),
+                        None => {
+                            after_error = Some("after-reference offset out of range");
+                            break;
+                        }
+                    },
+                    None => {
+                        after_error = Some("after-reference unplaced");
+                        break;
+                    }
+                }
+            }
+            if let Some(reason) = after_error {
+                conflicts.push(Conflict {
+                    item: item.task_id,
+                    reason: reason.to_string(),
                 });
                 continue;
             }
@@ -127,7 +152,7 @@ pub fn re_plan(
     };
 
     // These checks deliberately stay outside the planner trait.
-    topo_order(store)?;
+    validate_temporal_dependencies(store)?;
     let preference_classes = resolve_preferences(store)?;
     let rank: BTreeMap<Id, usize> = preference_classes
         .into_iter()
@@ -151,7 +176,7 @@ pub fn re_plan(
         .collect();
     let unpinned_candidates: BTreeSet<Id> =
         candidates.difference(&pinned_candidates).copied().collect();
-    let order = candidate_order(store, &unpinned_candidates, &rank);
+    let order = candidate_order(store, &unpinned_candidates, &rank)?;
 
     let mut items = Vec::new();
     let mut conflicts = Vec::new();
@@ -194,6 +219,50 @@ pub fn re_plan(
             }
         }
 
+        let mut after_refs = Vec::new();
+        let mut after_error = None;
+        for reference in &task.after {
+            let Some(predecessor) = store.tasks.get(&reference.task_id) else {
+                after_error = Some("unresolved after-reference");
+                break;
+            };
+            if predecessor.status == TaskStatus::Done {
+                continue;
+            }
+            let fixed_end = predecessor
+                .pinned
+                .as_ref()
+                .map(|window| window.end)
+                .or_else(|| {
+                    fixed_blocks
+                        .iter()
+                        .filter(|block| block.id == reference.task_id)
+                        .filter_map(|block| block.window.as_ref().map(|window| window.end))
+                        .max()
+                });
+            if let Some(end) = fixed_end {
+                match end.checked_add_signed(reference.offset) {
+                    Some(floor) => earliest_floor = earliest_floor.max(floor),
+                    None => {
+                        after_error = Some("after-reference offset out of range");
+                        break;
+                    }
+                }
+            } else if unpinned_candidates.contains(&reference.task_id) {
+                after_refs.push((reference.task_id, reference.offset));
+            } else {
+                after_error = Some("unresolved after-reference");
+                break;
+            }
+        }
+        if let Some(reason) = after_error {
+            conflicts.push(Conflict {
+                item: task.id,
+                reason: reason.to_string(),
+            });
+            continue;
+        }
+
         if unresolved_hidden_precedence {
             conflicts.push(Conflict {
                 item: task.id,
@@ -217,6 +286,7 @@ pub fn re_plan(
             earliest_floor,
             due: task.due,
             sched_predecessors,
+            after_refs,
         });
     }
 
@@ -299,16 +369,36 @@ pub fn next_task(store: &Store, plan: &Plan, now: DateTime<Utc>) -> Option<Id> {
         .map(|entry| entry.item)
 }
 
+/// Validate the combined precedence graph without changing `topo_order`'s API.
+/// Missing after references are left for planning to surface as task conflicts.
+/// As with dependency validation, cycles include all stored tasks and statuses.
+pub fn validate_temporal_dependencies(store: &Store) -> Result<(), CoreError> {
+    topo_order(store)?;
+    candidate_order(
+        store,
+        &store.tasks.keys().copied().collect(),
+        &BTreeMap::new(),
+    )?;
+    Ok(())
+}
+
 fn candidate_order(
     store: &Store,
     candidates: &BTreeSet<Id>,
     rank: &BTreeMap<Id, usize>,
-) -> Vec<Id> {
+) -> Result<Vec<Id>, CoreError> {
     let mut indegree: BTreeMap<Id, usize> =
         candidates.iter().map(|task_id| (*task_id, 0)).collect();
     let mut dependents: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
     for task_id in candidates {
-        for predecessor_id in &store.tasks[task_id].blocked_by {
+        let task = &store.tasks[task_id];
+        let predecessors: BTreeSet<_> = task
+            .blocked_by
+            .iter()
+            .copied()
+            .chain(task.after.iter().map(|reference| reference.task_id))
+            .collect();
+        for predecessor_id in &predecessors {
             if candidates.contains(predecessor_id) {
                 *indegree.get_mut(task_id).expect("candidate has indegree") += 1;
                 dependents
@@ -343,8 +433,16 @@ fn candidate_order(
         }
     }
 
-    debug_assert_eq!(order.len(), candidates.len());
-    order
+    if order.len() != candidates.len() {
+        return Err(CoreError::DependencyCycle {
+            involved: indegree
+                .into_iter()
+                .filter(|(_, degree)| *degree > 0)
+                .map(|(id, _)| id)
+                .collect(),
+        });
+    }
+    Ok(order)
 }
 
 fn earliest_gap(
