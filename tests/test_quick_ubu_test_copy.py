@@ -2,7 +2,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import io
 from pathlib import Path
-import tempfile
+import sqlite3
 import unittest
 from unittest.mock import patch
 
@@ -55,10 +55,31 @@ class Calendar:
 
 class ResetAndCopyTests(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory.cleanup)
-        self.store = Path(self.directory.name) / "quick-ubu-store.json"
-        self.store.write_text("original store")
+        self.store = Path("memory/quick-ubu-store.db")
+        # SQLite bytes and simulated paths stay in memory; no Google or disk I/O.
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+            connection.execute("INSERT INTO tasks VALUES ('task-1', '{}')")
+            connection.commit()
+            self.original_store = connection.serialize()
+        finally:
+            connection.close()
+        self.files = {self.store: self.original_store}
+        self.sidecars = [Path(str(self.store) + suffix)
+                         for suffix in ("-journal", "-wal", "-shm")]
+        self.files.update({path: b"journal fixture" for path in self.sidecars})
+        self.original_files = self.files.copy()
+
+        def unlink(path, missing_ok=False):
+            if path not in self.files and not missing_ok:
+                raise FileNotFoundError(path)
+            self.files.pop(path, None)
+
+        self.unlink = unlink
+        patcher = patch.object(Path, "unlink", unlink)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.start = datetime(2026, 9, 5, tzinfo=timezone.utc)
 
     def marker(self, **extra):
@@ -74,7 +95,7 @@ class ResetAndCopyTests(unittest.TestCase):
         }
 
     def assert_untouched(self, source, destination):
-        self.assertEqual(self.store.read_text(), "original store")
+        self.assertEqual(self.files, self.original_files)
         self.assertEqual(source.deletes, [])
         self.assertEqual(source.inserts, [])
         self.assertEqual(destination.deletes, [])
@@ -142,7 +163,8 @@ class ResetAndCopyTests(unittest.TestCase):
             ],
         )
         report = reset_and_copy(source, destination, self.store, self.start)
-        self.assertFalse(self.store.exists())
+        self.assertNotIn(self.store, self.files)
+        self.assertTrue(all(path not in self.files for path in self.sidecars))
         self.assertEqual(destination.deletes, ["old-dynamic", "old-fixed"])
         self.assertEqual(destination.inserts, [
             {key: value for key, value in dynamic.items() if key != "id"},
@@ -283,7 +305,8 @@ class ResetAndCopyTests(unittest.TestCase):
         report = reset_and_copy(source, destination, self.store, self.start)
         self.assertEqual(destination.deletes, ["old"])
         self.assertEqual(report["copied"], 0)
-        self.assertFalse(self.store.exists())
+        self.assertNotIn(self.store, self.files)
+        self.assertTrue(all(path not in self.files for path in self.sidecars))
 
     def test_store_deletion_failure_prevents_calendar_writes(self):
         source = Calendar()
@@ -305,10 +328,74 @@ class ResetAndCopyTests(unittest.TestCase):
         with patch.object(destination, "delete", return_value=Request(RuntimeError("delete failed"))):
             with self.assertRaisesRegex(RuntimeError, "delete failed"):
                 reset_and_copy(source, destination, self.store, self.start)
-        self.assertFalse(self.store.exists())
+        self.assertNotIn(self.store, self.files)
+        self.assertTrue(all(path not in self.files for path in self.sidecars))
         self.assertEqual(destination.inserts, [])
         self.assertEqual(source.deletes, [])
         self.assertEqual(source.inserts, [])
+
+    def test_reset_removes_only_selected_database_and_its_sidecars(self):
+        unrelated = {
+            Path("memory/quick-ubu-store.json"): b"legacy store",
+            Path("memory/other.db"): b"other database",
+            Path("memory/quick-ubu-store.wal"): b"unrelated suffix",
+        }
+        self.files.update(unrelated)
+        source = Calendar()
+        destination = Calendar(marker_pages=[{"items": [self.marker()]}])
+        reset_and_copy(source, destination, self.store, self.start)
+        self.assertEqual(self.files, unrelated)
+
+    def test_absent_sidecars_are_allowed(self):
+        for path in self.sidecars:
+            self.files.pop(path)
+        source = Calendar()
+        destination = Calendar(marker_pages=[{"items": [self.marker()]}])
+        reset_and_copy(source, destination, self.store, self.start)
+        self.assertEqual(self.files, {})
+
+    def test_sidecar_deletion_failure_prevents_calendar_writes(self):
+        source = Calendar(event_pages=[{"items": [self.event("new")]}])
+        destination = Calendar(
+            marker_pages=[{"items": [self.marker()]}],
+            event_pages=[{"items": [self.event("old")]}],
+        )
+        for failed_path in self.sidecars:
+            with self.subTest(path=failed_path):
+                self.files = self.original_files.copy()
+
+                def unlink(path, missing_ok=False):
+                    if path == failed_path:
+                        raise PermissionError("journal is read-only")
+                    self.unlink(path, missing_ok=missing_ok)
+
+                with patch.object(Path, "unlink", unlink):
+                    with self.assertRaisesRegex(PermissionError, "journal is read-only"):
+                        reset_and_copy(source, destination, self.store, self.start)
+                self.assertIn(failed_path, self.files)
+                self.assertEqual(destination.deletes, [])
+                self.assertEqual(destination.inserts, [])
+                self.assertEqual(source.deletes, [])
+                self.assertEqual(source.inserts, [])
+
+    def test_cli_uses_sqlite_default_and_honors_custom_store(self):
+        for arguments, expected in [
+            ([], Path("quick-ubu-store.db")),
+            (["--store", "custom/test.db"], Path("custom/test.db")),
+        ]:
+            with self.subTest(arguments=arguments):
+                destination, source = Calendar(), Calendar()
+                with patch("tests.quick_ubu_test_copy.calendar_service",
+                           side_effect=[destination, source]), \
+                        patch("tests.quick_ubu_test_copy.reset_and_copy", return_value={}) as reset, \
+                        patch("sys.stdout", io.StringIO()):
+                    result = main([
+                        "--source-credentials", "main.json", "--source-token", "main.pickle",
+                        "--destination-credentials", "dummy.json", "--destination-token", "dummy.pickle",
+                        "--from", self.start.isoformat(), *arguments,
+                    ])
+                self.assertEqual(result, 0)
+                self.assertEqual(reset.call_args.args, (source, destination, expected, self.start))
 
     def test_cli_returns_error_for_missing_destination_marker(self):
         destination = Calendar()

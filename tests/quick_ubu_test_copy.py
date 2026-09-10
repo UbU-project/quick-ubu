@@ -116,7 +116,12 @@ def reset_and_copy(source, destination, store_path, start, *, now=None):
     }
     deletions = list(list_events(destination, **deletion_query))
 
-    store_path.unlink(missing_ok=True)
+    # Reset the whole SQLite store, including journal files left by an interrupted
+    # process. Quick UbU must be stopped while its database is being removed.
+    # Append suffixes: SQLite uses store.db-wal, not store.wal.
+    for path in [store_path, *(Path(str(store_path) + suffix)
+                               for suffix in ("-journal", "-wal", "-shm"))]:
+        path.unlink(missing_ok=True)
     for event in deletions:
         destination.events().delete(
             calendarId=CALENDAR_ID, eventId=event["id"], sendUpdates="none",
@@ -145,7 +150,10 @@ def main(argv=None):
     parser.add_argument("--source-token", type=Path, required=True)
     parser.add_argument("--destination-credentials", type=Path, required=True)
     parser.add_argument("--destination-token", type=Path, required=True)
-    parser.add_argument("--store", type=Path, default=Path("quick-ubu-store.json"))
+    parser.add_argument(
+        "--store", type=Path, default=Path("quick-ubu-store.db"),
+        help="SQLite store to remove, including journals (default: quick-ubu-store.db); stop Quick UbU before resetting",
+    )
     parser.add_argument("--from", dest="start", help="Copy start ISO timestamp with timezone; defaults to now; deletion covers 24 hours ago onward with no future limit")
     args = parser.parse_args(argv)
     try:
