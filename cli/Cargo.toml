@@ -2,6 +2,8 @@
 name = "cli"
 version = "0.1.0"
 edition = "2021"
+# Command scenarios are included in the binary unit harness for in-memory I/O.
+autotests = false
 
 [[bin]]
 name = "quick-ubu"

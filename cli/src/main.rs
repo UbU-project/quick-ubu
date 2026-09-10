@@ -1,5 +1,28 @@
+// Only test builds replace terminal and file I/O with the memory harness.
+#[cfg(test)]
+macro_rules! print {
+    ($($arg:tt)*) => { crate::test_support::print(format_args!($($arg)*)) };
+}
+#[cfg(test)]
+macro_rules! println {
+    () => { crate::test_support::print(format_args!("\n")) };
+    ($($arg:tt)*) => { crate::test_support::print(format_args!("{}\n", format_args!($($arg)*))) };
+}
+#[cfg(test)]
+macro_rules! eprintln {
+    ($($arg:tt)*) => { crate::test_support::eprint(format_args!("{}\n", format_args!($($arg)*))) };
+}
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+#[path = "../tests/commands.rs"]
+mod command_tests;
+
 use std::collections::BTreeMap;
+#[cfg(not(test))]
 use std::fs;
+#[cfg(test)]
+use test_support::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -549,7 +572,10 @@ fn review_decisions(store: &mut ubu_core::Store) -> Result<(), String> {
         .unwrap_or_default()
         .as_nanos() as u64;
     let decision_ids = logic::shuffled_pending_ids(store, seed, plan.as_ref(), now);
+    #[cfg(not(test))]
     let stdin = io::stdin();
+    #[cfg(test)]
+    let stdin = test_support::stdin();
 
     for decision_id in decision_ids {
         let Some(decision) = store
@@ -784,6 +810,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn store_defaults_to_sqlite_and_accepts_an_explicit_path() {
+        assert_eq!(
+            Cli::try_parse_from(["quick-ubu", "list"]).unwrap().store,
+            PathBuf::from("quick-ubu-store.db")
+        );
+        assert_eq!(
+            Cli::try_parse_from(["quick-ubu", "--store", "custom.db", "list"])
+                .unwrap().store,
+            PathBuf::from("custom.db")
+        );
+    }
+
+    #[test]
     fn report_command_parses_defaults_and_overrides_without_io() {
         let cli = Cli::try_parse_from(["quick-ubu", "report"]).unwrap();
         let Command::Report(args) = cli.command else {
@@ -844,7 +883,7 @@ mod tests {
         assert_eq!(persisted["work"], "9");
         assert_eq!(persisted["custom"], "8");
 
-        let path = std::env::temp_dir().join(format!("gc-4-colors-{}.json", uuid::Uuid::new_v4()));
+        let path = PathBuf::from("memory").join(format!("gc-4-colors-{}.json", uuid::Uuid::new_v4()));
         fs::write(&path, r#"{"personal":"7","file_only":"2"}"#).unwrap();
         let colors = effective_color_map(&store, Some(&path)).unwrap();
         assert_eq!(colors["personal"], "7");
@@ -865,7 +904,7 @@ mod tests {
 
     #[test]
     fn legacy_store_without_category_colors_loads_empty_and_uses_defaults() {
-        let path = std::env::temp_dir().join(format!("gc-4-legacy-{}.json", uuid::Uuid::new_v4()));
+        let path = PathBuf::from("memory").join(format!("gc-4-legacy-{}.json", uuid::Uuid::new_v4()));
         fs::write(
             &path,
             r#"{"objectives":{},"tasks":{},"bundles":{},"preferences":[],"log":[]}"#,
@@ -898,7 +937,7 @@ mod tests {
             end: now + chrono::Duration::minutes(30),
             transparent: false,
         };
-        let path = std::env::temp_dir().join(format!("gc-4-import-{}.json", uuid::Uuid::new_v4()));
+        let path = PathBuf::from("memory").join(format!("gc-4-import-{}.json", uuid::Uuid::new_v4()));
         fs::write(&path, r#"{"work":"9","relationship":"3"}"#).unwrap();
         for (layer, expected) in [(0, "personal"), (1, "work"), (2, "relationship")] {
             let mut store = ubu_core::Store::new();

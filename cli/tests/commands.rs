@@ -1,24 +1,17 @@
-use std::fs;
-use std::io::Write;
+use crate::test_support::{self, fs, Output};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
 
 use chrono::{Duration, NaiveTime};
 use ubu_core::{Recurrence, RoutineTemplate, Store, TaskStatus, Tier};
 use uuid::Uuid;
 
-fn temp_store() -> (PathBuf, PathBuf) {
-    let directory = std::env::temp_dir().join(format!("quick-ubu-cli-{}", Uuid::new_v4()));
-    (directory.clone(), directory.join("store.json"))
+fn memory_store() -> (PathBuf, PathBuf) {
+    let directory = PathBuf::from("memory").join(format!("quick-ubu-cli-{}", Uuid::new_v4()));
+    (directory.clone(), directory.join("store.db"))
 }
 
 fn quick_ubu(store: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_quick-ubu"))
-        .arg("--store")
-        .arg(store)
-        .args(arguments)
-        .output()
-        .expect("quick-ubu must run")
+    test_support::run(store, arguments, "")
 }
 
 fn assert_success(output: &Output) {
@@ -30,27 +23,12 @@ fn assert_success(output: &Output) {
 }
 
 fn quick_ubu_with_input(store: &Path, command: &str, input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_quick-ubu"))
-        .arg("--store")
-        .arg(store)
-        .arg(command)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
-    child.wait_with_output().unwrap()
+    test_support::run(store, &[command], input)
 }
 
 #[test]
 fn prioritize_enqueues_before_review_and_quitting_keeps_the_queue_in_order() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
     for title in ["Alpha", "Bravo", "Charlie"] {
         assert_success(&quick_ubu(
             &store_path,
@@ -98,7 +76,7 @@ fn prioritize_enqueues_before_review_and_quitting_keeps_the_queue_in_order() {
 
 #[test]
 fn review_presents_each_pending_pair_once_and_drains_all_skipped_decisions() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
     for title in ["Alpha", "Bravo", "Charlie"] {
         assert_success(&quick_ubu(
             &store_path,
@@ -133,7 +111,7 @@ fn review_presents_each_pending_pair_once_and_drains_all_skipped_decisions() {
 
 #[test]
 fn done_persists_completion_and_report_reads_it_without_mutating_store() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
     let added = quick_ubu(
         &store_path,
         &[
@@ -177,7 +155,7 @@ fn done_persists_completion_and_report_reads_it_without_mutating_store() {
 
 #[test]
 fn report_cli_clamps_transparent_pins_and_sorts_categories() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
     for args in [
         vec![
             "add",
@@ -227,8 +205,8 @@ fn report_cli_clamps_transparent_pins_and_sorts_categories() {
 }
 
 #[test]
-fn report_empty_store_and_invalid_windows_do_not_create_a_store() {
-    let (_directory, store_path) = temp_store();
+fn report_empty_store_and_invalid_windows_leave_the_store_empty() {
+    let (_directory, store_path) = memory_store();
     let report = quick_ubu(&store_path, &["report", "--days", "14"]);
     assert_success(&report);
     assert_eq!(String::from_utf8(report.stdout).unwrap(), "Total   0h 0m\n");
@@ -240,18 +218,26 @@ fn report_empty_store_and_invalid_windows_do_not_create_a_store() {
         assert!(!report.status.success());
         assert!(!report.stderr.is_empty());
     }
-    assert!(!store_path.exists());
+    assert!(fs::exists(&store_path));
+    assert_eq!(
+        serde_json::from_str::<Store>(&fs::read_to_string(&store_path).unwrap()).unwrap(),
+        Store::new()
+    );
 }
 
 #[test]
 fn set_color_persists_and_color_list_reflects_overrides() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
     let defaults = quick_ubu(&store_path, &["color-list"]);
     assert_success(&defaults);
     let stdout = String::from_utf8(defaults.stdout).unwrap();
     assert_eq!(stdout.lines().count(), 11);
     assert!(stdout.lines().any(|line| line == "personal  3"));
-    assert!(!store_path.exists());
+    assert!(fs::exists(&store_path));
+    assert_eq!(
+        serde_json::from_str::<Store>(&fs::read_to_string(&store_path).unwrap()).unwrap(),
+        Store::new()
+    );
 
     for color in ["5", "7"] {
         assert_success(&quick_ubu(&store_path, &["set-color", "personal", color]));
@@ -273,7 +259,7 @@ fn set_color_persists_and_color_list_reflects_overrides() {
 
 #[test]
 fn add_repeatable_reminders_persist_and_appear_in_replan() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
     assert_success(&quick_ubu(
         &store_path,
         &[
@@ -326,7 +312,7 @@ fn add_repeatable_reminders_persist_and_appear_in_replan() {
 
 #[test]
 fn canonical_routines_import_list_generate_and_replan_with_reminders() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/example-routine.json");
     assert_success(&quick_ubu(
         &store_path,
@@ -386,7 +372,7 @@ fn canonical_routines_import_list_generate_and_replan_with_reminders() {
 
 #[test]
 fn set_model_command_persists_and_replaces_the_model() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
     for model in ["first-model", "replacement-model"] {
         assert_success(&quick_ubu(&store_path, &["set-model", model]));
         let store: Store = serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
@@ -397,7 +383,7 @@ fn set_model_command_persists_and_replaces_the_model() {
 
 #[test]
 fn advise_and_ollama_replan_without_model_fail_before_http_or_save() {
-    let (_, store_path) = temp_store();
+    let (_, store_path) = memory_store();
     // There is no configured model, so neither command can reach the transport.
     for arguments in [vec!["advise"], vec!["replan", "--planner", "ollama"]] {
         let output = quick_ubu(&store_path, &arguments);
@@ -406,13 +392,17 @@ fn advise_and_ollama_replan_without_model_fail_before_http_or_save() {
             String::from_utf8(output.stderr).unwrap(),
             "quick-ubu: no ollama model set; run: quick-ubu set-model <name>\n"
         );
-        assert!(!store_path.exists());
+        assert!(fs::exists(&store_path));
+        assert_eq!(
+            serde_json::from_str::<Store>(&fs::read_to_string(&store_path).unwrap()).unwrap(),
+            Store::new()
+        );
     }
 }
 
 #[test]
 fn add_pin_persists_a_scheduled_pinned_task() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
     let output = quick_ubu(
         &store_path,
         &[
@@ -434,12 +424,12 @@ fn add_pin_persists_a_scheduled_pinned_task() {
     assert_eq!(pinned.start.to_rfc3339(), "2030-01-02T15:00:00+00:00");
     assert_eq!(pinned.end.to_rfc3339(), "2030-01-02T15:45:00+00:00");
 
-    fs::remove_dir_all(directory).expect("temporary directory is removable");
+    fs::remove_dir_all(directory).expect("memory directory is removable");
 }
 
 #[test]
 fn add_category_sets_it_and_omitting_the_flag_defaults_to_none() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
     let categorized = quick_ubu(
         &store_path,
         &[
@@ -484,12 +474,12 @@ fn add_category_sets_it_and_omitting_the_flag_defaults_to_none() {
     let replan_output = String::from_utf8(replanned.stdout).unwrap();
     assert!(replan_output.contains("Categorized task  business  transparent"));
 
-    fs::remove_dir_all(directory).expect("temporary directory is removable");
+    fs::remove_dir_all(directory).expect("memory directory is removable");
 }
 
 #[test]
 fn next_prints_the_expected_dynamic_task_and_window() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
     let pinned = quick_ubu(
         &store_path,
         &[
@@ -517,26 +507,26 @@ fn next_prints_the_expected_dynamic_task_and_window() {
     assert!(stdout.contains('–'));
     assert_eq!(stdout.matches("+00:00").count(), 2);
 
-    fs::remove_dir_all(directory).expect("temporary directory is removable");
+    fs::remove_dir_all(directory).expect("memory directory is removable");
 }
 
 #[test]
 fn next_prints_nothing_ready_for_an_empty_store() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
 
     let output = quick_ubu(&store_path, &["next"]);
     assert_success(&output);
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "nothing ready\n");
 
-    if directory.exists() {
-        fs::remove_dir_all(directory).expect("temporary directory is removable");
+    if fs::exists(&directory) {
+        fs::remove_dir_all(directory).expect("memory directory is removable");
     }
 }
 
 #[test]
 fn routine_import_list_and_generate_complete_the_cli_flow() {
-    let (directory, store_path) = temp_store();
-    fs::create_dir_all(&directory).expect("temporary directory is creatable");
+    let (directory, store_path) = memory_store();
+    fs::create_dir_all(&directory).expect("memory directory is creatable");
     let import_path = directory.join("routines.json");
     let routines = vec![
         RoutineTemplate {
@@ -639,12 +629,12 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
         "created 0, skipped 3\n"
     );
 
-    fs::remove_dir_all(directory).expect("temporary directory is removable");
+    fs::remove_dir_all(directory).expect("memory directory is removable");
 }
 
 #[test]
 fn generate_blocks_daily_routines_before_launch_using_local_dates() {
-    let (directory, store_path) = temp_store();
+    let (directory, store_path) = memory_store();
     fs::create_dir_all(&directory).unwrap();
     let mut store = Store::new();
     for (id, recurrence) in [
@@ -669,7 +659,7 @@ fn generate_blocks_daily_routines_before_launch_using_local_dates() {
             recurrence,
         });
     }
-    fs::write(&store_path, serde_json::to_string(&store).unwrap()).unwrap();
+    test_support::seed(&store_path, &store);
     // Entirely before launch: monthly routines still generate, daily ones do not.
     for (days, expected) in [
         ("2", "created 1, skipped 0\n"),

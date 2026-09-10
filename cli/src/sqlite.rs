@@ -294,3 +294,236 @@ fn read_strings(connection: &Connection, query: &str) -> Result<Value, String> {
     }
     Ok(Value::Object(result))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+    use ubu_core::{
+        Bundle, CommandKind, DecisionRecord, DecisionSource, DeferPolicy, LogEntry, LogEntryKind,
+        Objective, ObjectiveStatus, PendingDecision, Preference, Proposal, Provenance, Relation,
+        Resolution, RoutineTemplate, Task, TaskStatus, Tier,
+    };
+    use uuid::Uuid;
+
+    fn populated_store() -> Store {
+        let id = Uuid::from_u128;
+        let at = Utc.with_ymd_and_hms(2026, 9, 11, 10, 0, 0).unwrap();
+        let mut store = Store::new();
+        store.objectives.insert(
+            id(1),
+            Objective {
+                id: id(1),
+                tier: Tier::UserShared,
+                title: "Ship 'SQLite' 🗓".into(),
+                detail: Some("All fields".into()),
+                target_date: Some(at),
+                status: ObjectiveStatus::Active,
+            },
+        );
+        store.tasks.insert(
+            id(2),
+            Task {
+                id: id(2),
+                tier: Tier::SemiPublic,
+                title: "Persist task".into(),
+                detail: Some("Details".into()),
+                objective_ids: vec![id(1)],
+                skills: vec!["Rust".into()],
+                affect_cost: 3,
+                est_duration: Duration::minutes(25),
+                due: Some(at),
+                earliest_start: Some(at),
+                category: Some("work's 🗓".into()),
+                pinned: None,
+                transparent: false,
+                reminders: vec![10, 0],
+                blocked_by: vec![],
+                defer_policy: DeferPolicy::ReturnToBacklog,
+                status: TaskStatus::Backlog,
+                provenance: Provenance::Manual,
+                commitment: None,
+            },
+        );
+        let routines: Vec<RoutineTemplate> =
+            serde_json::from_str(include_str!("../../docs/example-routine.json")).unwrap();
+        for routine in routines {
+            store.routines.insert(routine.id, routine);
+        }
+        for n in [3, 4] {
+            store.bundles.insert(
+                id(n),
+                Bundle {
+                    id: id(n),
+                    members: [id(2)].into_iter().collect(),
+                },
+            );
+        }
+        store.preferences.push(Preference {
+            left: id(3),
+            right: id(4),
+            relation: Relation::Strict,
+        });
+        let proposal = Proposal::Preference {
+            a: id(2),
+            b: id(5),
+            suggested: None,
+        };
+        // Queue order must survive even when IDs sort in the opposite direction.
+        for n in [20, 10] {
+            store.pending_decisions.push(PendingDecision {
+                id: id(n),
+                source: DecisionSource::Elicitation,
+                proposal: proposal.clone(),
+            });
+        }
+        store.decision_history.push(DecisionRecord {
+            proposal,
+            resolution: Resolution::Skipped,
+            at,
+        });
+        store.calendar_links.insert(id(2), "event-'雪'".into());
+        store
+            .export_signatures
+            .insert(id(2), "signature\nwith quotes: \"".into());
+        store.category_colors.insert("work's 🗓".into(), "9".into());
+        store.ollama_model = Some("local-model".into());
+        // The first two entries share a timestamp; their insertion order is meaningful.
+        for (n, seconds) in [(30, 0), (29, 0), (28, 1)] {
+            store.log.push(LogEntry {
+                id: id(n),
+                at: at + Duration::seconds(seconds),
+                kind: LogEntryKind::Command(CommandKind::Capture {
+                    task: store.tasks[&id(2)].clone(),
+                }),
+            });
+        }
+        store
+    }
+
+    #[test]
+    fn sqlite_round_trips_every_store_field_and_preserves_queue_and_log_ties() {
+        let backend = SqliteBackend::in_memory().unwrap();
+        assert_eq!(backend.load().unwrap(), Store::new());
+        let store = populated_store();
+        backend.save(&store).unwrap();
+        assert_eq!(backend.load().unwrap(), store);
+        assert_eq!(backend.load().unwrap(), store);
+    }
+
+    #[test]
+    fn removing_entities_and_clearing_maps_vectors_and_model_rewrites_all_bounded_tables() {
+        let backend = SqliteBackend::in_memory().unwrap();
+        let mut store = populated_store();
+        backend.save(&store).unwrap();
+        store.tasks.remove(&Uuid::from_u128(2));
+        backend.save(&store).unwrap();
+        assert_eq!(backend.load().unwrap(), store);
+        let cleared = Store {
+            log: store.log,
+            ..Store::new()
+        };
+        backend.save(&cleared).unwrap();
+        assert_eq!(backend.load().unwrap(), cleared);
+    }
+
+    fn log_rows(backend: &SqliteBackend) -> Vec<(i64, String, i64, String)> {
+        backend
+            .connection
+            .prepare("SELECT rowid, id, at, data FROM log ORDER BY at, rowid")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn log_appends_without_duplicates_and_never_updates_or_deletes_existing_rows() {
+        let backend = SqliteBackend::in_memory().unwrap();
+        let mut store = populated_store();
+        backend.save(&store).unwrap();
+        let original_rows = log_rows(&backend);
+        let mut entry = store.log.last().unwrap().clone();
+        entry.id = Uuid::from_u128(40);
+        entry.at += Duration::seconds(1);
+        store.log.push(entry);
+        backend.save(&store).unwrap();
+        backend.save(&store).unwrap();
+        assert_eq!(backend.load().unwrap(), store);
+        assert_eq!(&log_rows(&backend)[..3], original_rows);
+        let expected = store.clone();
+        store.log.remove(0);
+        store.log[0].at += Duration::days(10);
+        store.log[0].kind = LogEntryKind::Command(CommandKind::RemoveTask {
+            task_id: Uuid::from_u128(2),
+        });
+        backend.save(&store).unwrap();
+        assert_eq!(backend.load().unwrap(), expected);
+        assert_eq!(&log_rows(&backend)[..3], original_rows);
+    }
+
+    #[test]
+    fn log_load_sorts_by_timestamp_then_stable_insertion_order_and_indexes_at() {
+        let backend = SqliteBackend::in_memory().unwrap();
+        let store = populated_store();
+        let mut shuffled = store.clone();
+        shuffled.log.rotate_right(1);
+        backend.save(&shuffled).unwrap();
+        assert_eq!(backend.load().unwrap(), store);
+        let index_columns: Vec<String> = backend
+            .connection
+            .prepare("PRAGMA index_info(log_at)")
+            .unwrap()
+            .query_map([], |row| row.get(2))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(index_columns, ["at"]);
+        assert_eq!(log_rows(&backend)[0].2, store.log[0].at.timestamp());
+    }
+
+    #[test]
+    fn failed_log_insert_rolls_back_all_bounded_rewrites_and_other_log_inserts() {
+        let backend = SqliteBackend::in_memory().unwrap();
+        let original = populated_store();
+        backend.save(&original).unwrap();
+        backend.connection.execute_batch(
+            "CREATE TRIGGER reject_log BEFORE INSERT ON log WHEN NEW.id = '00000000-0000-0000-0000-000000000063' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
+        ).unwrap();
+        let mut changed = Store::new();
+        for n in [98, 99] {
+            let mut entry = original.log[0].clone();
+            entry.id = Uuid::from_u128(n);
+            changed.log.push(entry);
+        }
+        assert!(backend
+            .save(&changed)
+            .unwrap_err()
+            .contains("injected failure"));
+        assert_eq!(backend.load().unwrap(), original);
+        backend
+            .connection
+            .execute_batch("DROP TRIGGER reject_log")
+            .unwrap();
+        backend.save(&changed).unwrap();
+        assert!(backend.load().unwrap().tasks.is_empty());
+        assert_eq!(backend.load().unwrap().log.len(), original.log.len() + 2);
+    }
+
+    #[test]
+    fn json_and_sqlite_backends_round_trip_equal_stores_through_the_trait() {
+        let json = crate::persist::JsonBackend {
+            path: Path::new("memory").join(format!("{}.json", Uuid::new_v4())),
+        };
+        let sqlite = SqliteBackend::in_memory().unwrap();
+        let store = populated_store();
+        for backend in [&json as &dyn StorageBackend, &sqlite as &dyn StorageBackend] {
+            backend.save(&store).unwrap();
+            assert_eq!(backend.load().unwrap(), store);
+        }
+        assert_eq!(json.load().unwrap(), sqlite.load().unwrap());
+    }
+}

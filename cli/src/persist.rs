@@ -1,4 +1,7 @@
+#[cfg(not(test))]
 use std::fs;
+#[cfg(test)]
+use crate::test_support::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -113,21 +116,21 @@ mod tests {
         store.upsert_objective(objective(objective_id, "Ship U-1"));
         store.upsert_task(task(task_id, "Build CLI", vec![objective_id]));
 
-        let directory = std::env::temp_dir().join(format!("quick-ubu-{}", Uuid::new_v4()));
+        let directory = PathBuf::from("memory").join(format!("quick-ubu-{}", Uuid::new_v4()));
         let path = directory.join("nested/store.json");
         let backend = JsonBackend { path };
         backend.save(&store).expect("store should save");
         let loaded = backend.load().expect("store should load");
 
         assert_eq!(loaded, store);
-        std::fs::remove_dir_all(directory).expect("temporary directory should be removable");
+        fs::remove_dir_all(directory).expect("memory directory should be removable");
     }
 
     #[test]
-    fn save_atomically_replaces_existing_file_without_leaving_temp_sibling() {
-        let directory = std::env::temp_dir().join(format!("quick-ubu-{}", Uuid::new_v4()));
+    fn json_save_replaces_existing_bytes_without_leaving_temp_sibling() {
+        let directory = PathBuf::from("memory").join(format!("quick-ubu-{}", Uuid::new_v4()));
         let path = directory.join("store.json");
-        fs::create_dir_all(&directory).expect("temporary directory should be creatable");
+        fs::create_dir_all(&directory).expect("memory directory should be creatable");
         fs::write(&path, "old incomplete content").expect("existing file should be writable");
 
         let objective_id = Uuid::from_u128(100);
@@ -141,8 +144,8 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&path).unwrap(), expected);
         assert_eq!(load(&path), Ok(store));
-        assert!(!temp_sibling(&path).exists());
-        fs::remove_dir_all(directory).expect("temporary directory should be removable");
+        assert!(!fs::exists(temp_sibling(&path)));
+        fs::remove_dir_all(directory).expect("memory directory should be removable");
     }
 
     #[test]

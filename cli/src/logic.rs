@@ -1483,7 +1483,8 @@ mod tests {
     fn set_model_persists_through_save_and_load() {
         let mut store = graph_store();
         set_model(&mut store, "saved-model".into());
-        let directory = std::env::temp_dir().join(format!("quick-ubu-model-{}", Uuid::new_v4()));
+        let directory =
+            std::path::PathBuf::from("memory").join(format!("quick-ubu-model-{}", Uuid::new_v4()));
         let path = directory.join("store.json");
         crate::persist::save(&path, &store).unwrap();
         assert_eq!(crate::persist::load(&path).unwrap(), store);
@@ -1493,7 +1494,7 @@ mod tests {
             resolve_model(&crate::persist::load(&path).unwrap(), None),
             Ok("replacement".into())
         );
-        std::fs::remove_dir_all(directory).unwrap();
+        crate::test_support::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
