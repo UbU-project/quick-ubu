@@ -498,10 +498,10 @@ fn run(cli: Cli) -> Result<(), String> {
                 GoogleCalendarTransport::new(args.credentials, args.token_cache, args.calendar_id);
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|error| format!("failed to start async runtime: {error}"))?;
-            let events = runtime.block_on(fetch_import_events(&store, &transport, &window))?;
+            let fetched = runtime.block_on(fetch_import_events(&store, &transport, &window))?;
             let report = import_from_calendar(
                 &mut store,
-                &events,
+                &fetched.events,
                 now,
                 Tier::UserShared,
                 &color_to_category,

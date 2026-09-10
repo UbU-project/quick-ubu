@@ -69,7 +69,7 @@ async fn linked_unfinished_events_are_imported_regardless_of_date() {
         let window = calendar_import_window(at(0), None, None).unwrap();
         let events = fetch_import_events(&store, &transport, &window)
             .await
-            .unwrap();
+            .unwrap().events;
         assert_eq!(events, vec![event.clone()]);
         assert_eq!(*transport.get_calls.borrow(), vec!["dynamic"]);
         let report = import_from_calendar(
@@ -131,7 +131,7 @@ async fn import_discovers_unlinked_events_beyond_the_old_seven_day_window() {
     let window = calendar_import_window(at(0), None, None).unwrap();
     let events = fetch_import_events(&store, &transport, &window)
         .await
-        .unwrap();
+        .unwrap().events;
     assert_eq!(events, vec![upcoming]);
     let report = import_from_calendar(
         &mut store,
@@ -162,18 +162,18 @@ async fn discovery_includes_recent_completions_and_deduplicates_linked_events() 
     let window = calendar_import_window(at(0), Some(at(0)), None).unwrap();
     let events = fetch_import_events(&store, &transport, &window)
         .await
-        .unwrap();
+        .unwrap().events;
     assert_eq!(events.len(), 2);
     assert!(events.contains(&recent));
-    assert!(transport.get_calls.borrow().is_empty());
+    assert_eq!(*transport.get_calls.borrow(), vec!["pinned-outside"]);
 
     // Old Done tasks are not fetched by ID outside the correction window.
     let old_transport = StubTransport::default();
     let events = fetch_import_events(&store, &old_transport, &window)
         .await
-        .unwrap();
+        .unwrap().events;
     assert!(events.is_empty());
-    assert_eq!(*old_transport.get_calls.borrow(), vec!["pending"]);
+    assert_eq!(*old_transport.get_calls.borrow(), vec!["pending", "pinned-outside"]);
 }
 
 #[tokio::test]

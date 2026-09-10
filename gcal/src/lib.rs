@@ -474,33 +474,42 @@ pub fn calendar_import_window(
     })
 }
 
-/// Discover events in the import window, then retrieve any missing linked,
-/// unfinished dynamic tasks by ID, even if their events moved outside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedImport {
+    pub events: Vec<FetchedEvent>,
+    pub deleted: Vec<Id>,
+}
+
+/// Discover events in the import window, then retrieve every missing linked,
+/// unfinished task by ID, even if its event moved outside the window.
+/// Only a per-ID None confirms deletion; list absence alone never does.
 /// Fetching finishes before the caller mutates or saves the store.
 pub async fn fetch_import_events<T: CalendarTransport>(
     store: &Store,
     transport: &T,
     window: &TimeWindow,
-) -> Result<Vec<FetchedEvent>, String> {
+) -> Result<FetchedImport, String> {
     let mut events: BTreeMap<_, _> = transport
         .list_events(window.start, window.end)
         .await?
         .into_iter()
         .map(|event| (event.id.clone(), event))
         .collect();
+    let mut deleted = Vec::new();
     for (task_id, event_id) in &store.calendar_links {
         let Some(task) = store.tasks.get(task_id) else {
             continue;
         };
-        if task.pinned.is_some() || task.status == TaskStatus::Done || events.contains_key(event_id)
-        {
+        if task.status == TaskStatus::Done || events.contains_key(event_id) {
             continue;
         }
         if let Some(event) = transport.get_event(event_id).await? {
             events.insert(event.id.clone(), event);
+        } else {
+            deleted.push(*task_id);
         }
     }
-    Ok(events.into_values().collect())
+    Ok(FetchedImport { events: events.into_values().collect(), deleted })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
