@@ -4,12 +4,17 @@ use std::path::{Path, PathBuf};
 
 use ubu_core::{Id, Store};
 
+#[path = "sqlite.rs"]
+mod sqlite;
+pub use sqlite::SqliteBackend;
+
 pub trait StorageBackend {
     fn load(&self) -> Result<Store, String>;
     fn save(&self, store: &Store) -> Result<(), String>;
 }
 
 /// Retained JSON backend for compatibility tests and callers of the storage trait.
+#[allow(dead_code)]
 pub struct JsonBackend {
     pub path: PathBuf,
 }
@@ -24,6 +29,7 @@ impl StorageBackend for JsonBackend {
     }
 }
 
+#[allow(dead_code)]
 pub fn load(path: &Path) -> Result<Store, String> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -35,6 +41,7 @@ pub fn load(path: &Path) -> Result<Store, String> {
         .map_err(|error| format!("failed to parse {}: {error}", path.display()))
 }
 
+#[allow(dead_code)]
 pub fn save(path: &Path, store: &Store) -> Result<(), String> {
     if let Some(parent) = path
         .parent()
@@ -64,6 +71,7 @@ pub fn save(path: &Path, store: &Store) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn temp_sibling(path: &Path) -> PathBuf {
     let mut temp_path = path.as_os_str().to_os_string();
     temp_path.push(".tmp");
