@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use ubu_core::{
     next_task, re_plan, resolve_preferences, topo_order, AffectBudget, Bundle, ComputeTarget,
     CoreError, DecisionRecord, DecisionSource, DeferPolicy, DeterministicPlacer, Id, Objective,
-    ObjectiveStatus, PendingDecision, Planner, PrefSuggestion, Preference, Proposal, Provenance,
-    Relation, Resolution, Store, Task, TaskStatus, Tier, TimeWindow,
+    ObjectiveStatus, PendingDecision, Plan, Planner, PrefSuggestion, Preference, Proposal,
+    Provenance, Relation, Resolution, Store, Task, TaskStatus, Tier, TimeWindow,
 };
 use uuid::Uuid;
 
@@ -704,15 +704,67 @@ pub fn shuffle_seeded<T>(items: &mut [T], seed: u64) {
     }
 }
 
-/// Shuffle presentation IDs without changing the stored pending queue.
-pub fn shuffled_pending_ids(store: &Store, seed: u64) -> Vec<Id> {
+/// Randomize presentation without mutating the queue. Decisions involving an
+/// upcoming dynamic Task receive weight 1 + 63 / (1 + days_until_start)^2,
+/// using the earlier of their two Tasks. Every decision retains baseline weight.
+/// Without a usable Plan, preserve the uniform shuffle.
+pub fn shuffled_pending_ids(
+    store: &Store,
+    seed: u64,
+    plan: Option<&Plan>,
+    now: DateTime<Utc>,
+) -> Vec<Id> {
     let mut ids = store
         .pending_decisions
         .iter()
         .map(|decision| decision.id)
         .collect::<Vec<_>>();
-    shuffle_seeded(&mut ids, seed);
-    ids
+    let mut weights = BTreeMap::<Id, f64>::new();
+    if let Some(plan) = plan {
+        for entry in &plan.entries {
+            let Some(task) = store.tasks.get(&entry.item) else {
+                continue;
+            };
+            if entry.is_handle
+                || entry.window.end <= now
+                || task.pinned.is_some()
+                || !matches!(task.status, TaskStatus::Backlog | TaskStatus::Scheduled)
+            {
+                continue;
+            }
+            let days = (entry.window.start - now).num_seconds().max(0) as f64 / 86_400.0;
+            let weight = 1.0 + 63.0 / (1.0 + days).powi(2);
+            // If a Task has multiple entries, use its earliest upcoming start.
+            weights
+                .entry(entry.item)
+                .and_modify(|old| *old = old.max(weight))
+                .or_insert(weight);
+        }
+    }
+    if weights.is_empty() {
+        shuffle_seeded(&mut ids, seed);
+        return ids;
+    }
+
+    let mut state = seed;
+    let mut scored = store
+        .pending_decisions
+        .iter()
+        .map(|decision| {
+            let (a, b) = advisor_pair(&decision.proposal);
+            let weight = weights
+                .get(&a)
+                .copied()
+                .unwrap_or(1.0)
+                .max(weights.get(&b).copied().unwrap_or(1.0));
+            // Exponential races give a weighted permutation without replacement.
+            // Use 52 random bits to keep U strictly between zero and one.
+            let uniform = ((splitmix64(&mut state) >> 12) + 1) as f64 / ((1u64 << 52) + 1) as f64;
+            (decision.id, -uniform.ln() / weight)
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| left.1.total_cmp(&right.1).then(left.0.cmp(&right.0)));
+    scored.into_iter().map(|(id, _)| id).collect()
 }
 
 pub fn enqueue_incomparable_pairs(store: &mut Store) -> usize {
@@ -1251,7 +1303,7 @@ mod tests {
     fn shuffled_pending_ids_are_stable_complete_and_do_not_mutate_the_store() {
         let mut store = graph_store();
         let (a, b, _) = graph_ids();
-        assert!(shuffled_pending_ids(&store, 42).is_empty());
+        assert!(shuffled_pending_ids(&store, 42, None, fixed_time()).is_empty());
         for index in 0..64 {
             store.pending_decisions.push(if index % 2 == 0 {
                 preference_decision(id(1000 + index), a, b)
@@ -1260,9 +1312,16 @@ mod tests {
             });
         }
         let before = store.clone();
-        let ids = shuffled_pending_ids(&store, 42);
-        assert_eq!(ids, shuffled_pending_ids(&store, 42));
-        assert_ne!(ids, shuffled_pending_ids(&store, 43));
+        let plan = review_test_plan(&store);
+        let ids = shuffled_pending_ids(&store, 42, Some(&plan), fixed_time());
+        assert_eq!(
+            ids,
+            shuffled_pending_ids(&store, 42, Some(&plan), fixed_time())
+        );
+        assert_ne!(
+            ids,
+            shuffled_pending_ids(&store, 43, Some(&plan), fixed_time())
+        );
         assert_eq!(ids.len(), store.pending_decisions.len());
         let unique: BTreeSet<_> = ids.iter().copied().collect();
         assert_eq!(unique.len(), ids.len());
@@ -1277,12 +1336,114 @@ mod tests {
         assert_eq!(store, before);
     }
 
+    fn review_test_plan(store: &Store) -> Plan {
+        re_plan(
+            store,
+            ComputeTarget::DesktopOllama,
+            fixed_time(),
+            fixed_time(),
+            &[],
+            &AffectBudget { cap: 100 },
+            &DeterministicPlacer,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn review_order_strongly_favors_near_term_tasks_but_keeps_other_decisions() {
+        let mut store = graph_store();
+        let (week, soon, tomorrow) = graph_ids();
+        store.tasks.get_mut(&week).unwrap().earliest_start = Some(fixed_time() + Duration::days(7));
+        store.tasks.get_mut(&tomorrow).unwrap().earliest_start =
+            Some(fixed_time() + Duration::days(1));
+        let plan = review_test_plan(&store);
+        let unscheduled = id(4);
+        let other = id(5);
+        store.upsert_task(graph_task(unscheduled, "Unscheduled"));
+        store.upsert_task(graph_task(other, "Other"));
+        // The upcoming Task can be either endpoint, and dependency decisions
+        // receive the same bias as preferences. Comparing soon against week
+        // must retain soon's weight, not average it away.
+        store.pending_decisions = vec![
+            preference_decision(id(101), week, soon),
+            dependency_decision(id(102), tomorrow, unscheduled),
+            preference_decision(id(103), week, unscheduled),
+            dependency_decision(id(104), unscheduled, other),
+        ];
+        let before = store.clone();
+        let mut first_counts = [0; 4];
+        for seed in 0..4096 {
+            let ids = shuffled_pending_ids(&store, seed, Some(&plan), fixed_time());
+            assert_eq!(
+                ids.iter().copied().collect::<BTreeSet<_>>(),
+                (101..=104).map(id).collect()
+            );
+            first_counts[(ids[0].as_u128() - 101) as usize] += 1;
+        }
+        assert!(first_counts[0] > 2800, "{first_counts:?}");
+        assert!(first_counts[1] > first_counts[2] * 4, "{first_counts:?}");
+        assert!(
+            first_counts[2] > 20 && first_counts[3] > 10,
+            "{first_counts:?}"
+        );
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn review_order_has_no_schedule_bias_for_pinned_inactive_or_past_entries() {
+        let mut original = graph_store();
+        enqueue_incomparable_pairs(&mut original);
+        let mut plan = review_test_plan(&original);
+        let (a, _, _) = graph_ids();
+        plan.entries.retain(|entry| entry.item == a);
+        for case in 0..6 {
+            let mut store = original.clone();
+            let mut plan = plan.clone();
+            match case {
+                0 => store.tasks.get_mut(&a).unwrap().pinned = Some(plan.entries[0].window.clone()),
+                1 => store.tasks.get_mut(&a).unwrap().status = TaskStatus::Done,
+                2 => store.tasks.get_mut(&a).unwrap().status = TaskStatus::Active,
+                3 => store.tasks.get_mut(&a).unwrap().status = TaskStatus::Deferred,
+                4 => plan.entries[0].window.end = fixed_time(),
+                _ => plan.entries[0].is_handle = true,
+            }
+            for seed in 0..32 {
+                assert_eq!(
+                    shuffled_pending_ids(&store, seed, Some(&plan), fixed_time()),
+                    shuffled_pending_ids(&store, seed, None, fixed_time())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_order_uses_earliest_upcoming_entry_even_when_task_spans_now() {
+        let mut store = graph_store();
+        enqueue_incomparable_pairs(&mut store);
+        let mut plan = review_test_plan(&store);
+        let mut split = plan.clone();
+        let mut later = split.entries[0].clone();
+        later.window.start += Duration::days(7);
+        later.window.end += Duration::days(7);
+        split.entries.insert(0, later);
+        // Moving the first entry's start into the past leaves it at maximum
+        // priority while it still overlaps now.
+        plan.entries[0].window.start -= Duration::hours(1);
+        for seed in 0..64 {
+            assert_eq!(
+                shuffled_pending_ids(&store, seed, Some(&plan), fixed_time()),
+                shuffled_pending_ids(&store, seed, Some(&split), fixed_time())
+            );
+        }
+    }
+
     #[test]
     fn shuffled_decisions_resolve_by_id_and_preserve_remaining_queue_order() {
         let mut store = graph_store();
         enqueue_incomparable_pairs(&mut store);
         let original = store.pending_decisions.clone();
-        let ids = shuffled_pending_ids(&store, 42);
+        let plan = review_test_plan(&store);
+        let ids = shuffled_pending_ids(&store, 42, Some(&plan), fixed_time());
         resolve_decision(&mut store, ids[0], Answer::Skip).unwrap();
         assert_eq!(
             store.pending_decisions,
@@ -1423,7 +1584,7 @@ mod tests {
             &mut store,
             ObjectiveAddInput {
                 title: "Publish research".into(),
-                tier: Tier::Public,
+                tier: Tier::SemiPublic,
                 target_date: Some(fixed_time() + Duration::days(7)),
             },
         );

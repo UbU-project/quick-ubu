@@ -641,3 +641,90 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
 
     fs::remove_dir_all(directory).expect("temporary directory is removable");
 }
+
+#[test]
+fn generate_blocks_daily_routines_before_launch_using_local_dates() {
+    let (directory, store_path) = temp_store();
+    fs::create_dir_all(&directory).unwrap();
+    let mut store = Store::new();
+    for (id, recurrence) in [
+        (1, Recurrence::Daily),
+        (
+            2,
+            Recurrence::MonthlyDay {
+                days: [10].into_iter().collect(),
+            },
+        ),
+    ] {
+        store.upsert_routine(RoutineTemplate {
+            id: Uuid::from_u128(id),
+            title: format!("routine-{id}"),
+            tier: Tier::UserShared,
+            start_time: NaiveTime::from_hms_opt(0, 30, 0).unwrap(),
+            duration: Duration::minutes(30),
+            affect_cost: 0,
+            category: None,
+            transparent: false,
+            reminders: Vec::new(),
+            recurrence,
+        });
+    }
+    fs::write(&store_path, serde_json::to_string(&store).unwrap()).unwrap();
+    // Entirely before launch: monthly routines still generate, daily ones do not.
+    for (days, expected) in [
+        ("2", "created 1, skipped 0\n"),
+        ("4", "created 2, skipped 1\n"),
+    ] {
+        let output = quick_ubu(
+            &store_path,
+            &[
+                "generate",
+                "--from",
+                "2026-09-09",
+                "--days",
+                days,
+                "--tz",
+                "Pacific/Kiritimati",
+            ],
+        );
+        assert_success(&output);
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    }
+    let store: Store = serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
+    assert_eq!(store.tasks.len(), 3);
+    let tz = ubu_core::Tz::Pacific__Kiritimati;
+    let mut daily_dates = store
+        .tasks
+        .values()
+        .filter(|task| task.title == "routine-1")
+        .map(|task| {
+            task.pinned
+                .as_ref()
+                .unwrap()
+                .start
+                .with_timezone(&tz)
+                .date_naive()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    daily_dates.sort();
+    assert_eq!(daily_dates, ["2026-09-11", "2026-09-12"]);
+    let output = quick_ubu(
+        &store_path,
+        &[
+            "generate",
+            "--from",
+            "2026-09-12",
+            "--days",
+            "1",
+            "--tz",
+            "Pacific/Kiritimati",
+        ],
+    );
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "created 0, skipped 1\n"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}

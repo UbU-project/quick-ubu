@@ -33,6 +33,17 @@ pub fn log_actual(
     }
 }
 
+pub fn log_undo_completion(task_id: Id, completion_id: Id, at: DateTime<Utc>) -> LogEntry {
+    LogEntry {
+        id: Uuid::new_v4(),
+        kind: LogEntryKind::Command(CommandKind::UndoCompletion {
+            task_id,
+            completion_id,
+        }),
+        at,
+    }
+}
+
 pub fn log_capture(task: Task, at: DateTime<Utc>) -> LogEntry {
     LogEntry {
         id: Uuid::new_v4(),
@@ -98,6 +109,13 @@ pub fn reconcile(store: &mut Store, log: &[LogEntry]) -> Result<(), CoreError> {
 
     for entry in ordered {
         match &entry.kind {
+            LogEntryKind::Command(CommandKind::UndoCompletion { task_id, .. }) => {
+                let task = store
+                    .tasks
+                    .get_mut(task_id)
+                    .ok_or(CoreError::UnknownTask { id: *task_id })?;
+                task.status = TaskStatus::Backlog;
+            }
             LogEntryKind::Fact(FactKind::Actual {
                 item_id, status, ..
             }) => {

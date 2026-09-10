@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Reset the dummy calendar and seed 14 days of dynamic Quick UbU tasks."""
+"""Reset the dummy calendar and copy 14 days of Google Calendar events, in all colors."""
 
 import argparse
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 import pickle
@@ -79,7 +79,6 @@ def reset_and_copy(source, destination, store_path, start, *, now=None):
     if now is None:
         now = datetime.now(timezone.utc)
     delete_start = now - timedelta(hours=24)
-    delete_end = now + timedelta(days=14)
     end = start + timedelta(days=14)
     query = {
         "timeMin": start.isoformat(),
@@ -92,18 +91,28 @@ def reset_and_copy(source, destination, store_path, start, *, now=None):
     # timeMin tests event end times, so check the source start time explicitly.
     copies = []
     for event in list_events(source, **query):
-        if event.get("colorId") is not None or event.get("status") == "cancelled":
+        if event.get("status") == "cancelled":
             continue
-        event_start = datetime.fromisoformat(event["start"]["dateTime"].replace("Z", "+00:00"))
-        if not start <= event_start < end:
+        if "dateTime" in event["start"]:
+            event_start = datetime.fromisoformat(event["start"]["dateTime"].replace("Z", "+00:00"))
+            in_window = start <= event_start < end
+        else:
+            # All-day events use dates, not timestamps. Include the 14 calendar
+            # dates beginning on the requested start date.
+            event_date = date.fromisoformat(event["start"]["date"])
+            in_window = start.date() <= event_date < end.date()
+        if not in_window:
             continue
         body = {key: deepcopy(event[key]) for key in COPY_FIELDS if key in event}
-        # Omitting colorId preserves the default color on the destination.
+        # Preserve explicit event colors; omit unset colors to keep the default.
+        if event.get("colorId"):
+            body["colorId"] = event["colorId"]
         copies.append((event["id"], body))
     deletion_query = {
-        **query,
         "timeMin": delete_start.isoformat(),
-        "timeMax": delete_end.isoformat(),
+        # No timeMax: remove future copies regardless of how far out they moved.
+        "singleEvents": True,
+        "orderBy": "startTime",
     }
     deletions = list(list_events(destination, **deletion_query))
 
@@ -123,7 +132,7 @@ def reset_and_copy(source, destination, store_path, start, *, now=None):
         "from": start.isoformat(),
         "to": end.isoformat(),
         "delete_from": delete_start.isoformat(),
-        "delete_to": delete_end.isoformat(),
+        "delete_to": None,  # Unbounded future deletion window.
         "deleted": len(deletions),
         "copied": len(mapping),
         "events": mapping,
@@ -137,7 +146,7 @@ def main(argv=None):
     parser.add_argument("--destination-credentials", type=Path, required=True)
     parser.add_argument("--destination-token", type=Path, required=True)
     parser.add_argument("--store", type=Path, default=Path("quick-ubu-store.json"))
-    parser.add_argument("--from", dest="start", help="Copy start ISO timestamp with timezone; defaults to now; deletion stays relative to now")
+    parser.add_argument("--from", dest="start", help="Copy start ISO timestamp with timezone; defaults to now; deletion covers 24 hours ago onward with no future limit")
     args = parser.parse_args(argv)
     try:
         now = datetime.now(timezone.utc)

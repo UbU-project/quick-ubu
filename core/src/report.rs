@@ -1,12 +1,12 @@
 //! Pure time totals from pinned windows and timestamped dynamic completions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::{ActualStatus, FactKind, LogEntryKind, Store};
+use crate::{ActualStatus, CommandKind, FactKind, LogEntryKind, Store};
 
-/// Count pinned overlaps and each unpinned Done fact in the inclusive window.
+/// Count pinned overlaps and each unretracted unpinned Done fact in the inclusive window.
 /// Transparency and current task status do not affect inclusion. Categories
 /// and estimated durations are read from the current task; missing tasks are skipped.
 pub fn report_by_category(
@@ -30,6 +30,19 @@ pub fn report_by_category(
         }
     }
 
+    // A correction retracts its original fact even when the correction itself
+    // falls outside the report window. Other completions of that task still count.
+    let undone: BTreeSet<_> = store
+        .log
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            LogEntryKind::Command(CommandKind::UndoCompletion {
+                task_id,
+                completion_id,
+            }) => Some((*task_id, *completion_id)),
+            _ => None,
+        })
+        .collect();
     for entry in &store.log {
         if entry.at < from || entry.at > to {
             continue;
@@ -42,6 +55,9 @@ pub fn report_by_category(
         else {
             continue;
         };
+        if undone.contains(&(*item_id, entry.id)) {
+            continue;
+        }
         let Some(task) = store.tasks.get(item_id) else {
             continue;
         };

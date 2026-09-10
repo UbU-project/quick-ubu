@@ -6,16 +6,16 @@ use std::process::ExitCode;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Duration, NaiveDate, Utc, Weekday};
+use chrono::{DateTime, NaiveDate, Utc, Weekday};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use gcal::{
-    default_category_colors, export_plan, import_from_calendar, CalendarTransport,
-    GoogleCalendarTransport,
+    calendar_import_window, default_category_colors, export_plan, fetch_import_events,
+    import_from_calendar, GoogleCalendarTransport,
 };
 use ollama_planner::{OllamaHttpTransport, OllamaPlanner};
 use ubu_core::{
-    generate_routine_tasks, re_plan, AffectBudget, ComputeTarget, DeterministicPlacer, Planner,
-    Recurrence, RoutineTemplate, TaskStatus, Tier, Tz,
+    generate_routine_tasks_with_daily_start, re_plan, AffectBudget, ComputeTarget,
+    DeterministicPlacer, Planner, Recurrence, RoutineTemplate, TaskStatus, Tier, Tz,
 };
 
 mod logic;
@@ -202,8 +202,10 @@ struct ImportArgs {
     credentials: PathBuf,
     #[arg(long, default_value = "token-cache.json")]
     token_cache: PathBuf,
+    /// RFC3339 lower bound; import always looks back at least 24 hours.
     #[arg(long)]
     from: Option<String>,
+    /// RFC3339 upper bound; import always looks ahead at least one calendar month.
     #[arg(long)]
     to: Option<String>,
     #[arg(long)]
@@ -443,7 +445,11 @@ fn run(cli: Cli) -> Result<(), String> {
                     .map_err(|error| format!("invalid date {value}: {error}"))?,
                 None => Utc::now().with_timezone(&tz).date_naive(),
             };
-            let report = generate_routine_tasks(&mut store, from, args.days, tz);
+            // TODO: Remove this temporary daily-routine cutoff after the
+            // September 11, 2026 launch; restore generate_routine_tasks here.
+            let daily_start = NaiveDate::from_ymd_opt(2026, 9, 11).unwrap();
+            let report =
+                generate_routine_tasks_with_daily_start(&mut store, from, args.days, tz, daily_start);
             persist::save(&cli.store, &store)?;
             println!("created {}, skipped {}", report.created, report.skipped);
         }
@@ -480,14 +486,9 @@ fn run(cli: Cli) -> Result<(), String> {
                 .from
                 .as_deref()
                 .map(logic::parse_datetime)
-                .transpose()?
-                .unwrap_or(now);
-            let to = args
-                .to
-                .as_deref()
-                .map(logic::parse_datetime)
-                .transpose()?
-                .unwrap_or(now + Duration::days(7));
+                .transpose()?;
+            let to = args.to.as_deref().map(logic::parse_datetime).transpose()?;
+            let window = calendar_import_window(now, from, to)?;
             // Duplicate colors resolve to the alphabetically last category.
             let color_to_category = effective_color_map(&store, args.color_config.as_deref())?
                 .into_iter()
@@ -497,7 +498,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 GoogleCalendarTransport::new(args.credentials, args.token_cache, args.calendar_id);
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|error| format!("failed to start async runtime: {error}"))?;
-            let events = runtime.block_on(transport.list_events(from, to))?;
+            let events = runtime.block_on(fetch_import_events(&store, &transport, &window))?;
             let report = import_from_calendar(
                 &mut store,
                 &events,
@@ -507,8 +508,8 @@ fn run(cli: Cli) -> Result<(), String> {
             );
             persist::save(&cli.store, &store)?;
             println!(
-                "captured {}, completed {}, moved {}",
-                report.captured, report.completed, report.moved
+                "captured {}, completed {}, reopened {}, moved {}, resized {}",
+                report.captured, report.completed, report.reopened, report.moved, report.resized
             );
         }
     }
@@ -517,11 +518,30 @@ fn run(cli: Cli) -> Result<(), String> {
 }
 
 fn review_decisions(store: &mut ubu_core::Store) -> Result<(), String> {
+    if store.pending_decisions.is_empty() {
+        return Ok(());
+    }
+    let now = Utc::now();
+    let plan = match re_plan(
+        store,
+        ComputeTarget::DesktopOllama,
+        now,
+        now,
+        &[],
+        &AffectBudget { cap: 100 },
+        &DeterministicPlacer,
+    ) {
+        Ok(plan) => Some(plan),
+        Err(error) => {
+            eprintln!("review planning failed: {error:?}; using uniform review order");
+            None
+        }
+    };
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
-    let decision_ids = logic::shuffled_pending_ids(store, seed);
+    let decision_ids = logic::shuffled_pending_ids(store, seed, plan.as_ref(), now);
     let stdin = io::stdin();
 
     for decision_id in decision_ids {
@@ -868,7 +888,7 @@ mod tests {
             summary: "Routine".into(),
             color_id: Some("3".into()),
             start: now,
-            end: now + Duration::minutes(30),
+            end: now + chrono::Duration::minutes(30),
             transparent: false,
         };
         let path = std::env::temp_dir().join(format!("gc-4-import-{}.json", uuid::Uuid::new_v4()));

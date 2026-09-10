@@ -184,6 +184,11 @@ pub enum FactKind {
 /// `PartialEq` only: `Capture` carries a [`Task`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CommandKind {
+    /// Reopen a task and retract one mistaken completion from time reports.
+    UndoCompletion {
+        task_id: Id,
+        completion_id: Id,
+    },
     Defer {
         handle_id: Id,
     },

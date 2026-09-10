@@ -1,13 +1,14 @@
 //! Google Calendar export behind a transport boundary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Months, Utc};
 use serde::{Deserialize, Serialize};
 use ubu_core::{
-    log_actual, log_capture, log_edit_duration, log_edit_pin, reconcile, visible_as_content,
-    ActualStatus, DeferPolicy, Id, Plan, Provenance, Store, Task, TaskStatus, Tier, TimeWindow,
+    log_actual, log_capture, log_edit_duration, log_edit_pin, log_undo_completion, reconcile,
+    visible_as_content, ActualStatus, DeferPolicy, FactKind, Id, LogEntryKind, Plan, Provenance,
+    Store, Task, TaskStatus, Tier, TimeWindow,
 };
 use yup_oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};
 
@@ -88,11 +89,14 @@ pub trait CalendarTransport {
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> Result<Vec<FetchedEvent>, String>;
+
+    /// Fetch a linked event without a date filter. Deleted events and events
+    /// without both start/end dateTime values return None.
+    async fn get_event(&self, event_id: &str) -> Result<Option<FetchedEvent>, String>;
 }
 
-/// Real Google transport. This code is compiled, but automated tests never
-/// exercise it; the operator must verify credentials, OAuth, and API behavior at
-/// runtime against a live Google Calendar endpoint.
+/// Real Google transport. HTTP handling is tested against a local server;
+/// credentials and OAuth still require verification against Google Calendar.
 pub struct GoogleCalendarTransport {
     credentials_path: PathBuf,
     token_cache_path: PathBuf,
@@ -164,6 +168,96 @@ impl GoogleCalendarTransport {
             .await
             .unwrap_or_else(|error| format!("failed to read response body: {error}"));
         format!("Google Calendar API returned {status}: {body}")
+    }
+
+    async fn parse_response<T: serde::de::DeserializeOwned>(
+        response: reqwest::Response,
+        resource: &str,
+    ) -> Result<T, String> {
+        let body = response.bytes().await.map_err(|error| {
+            format!("failed to read Google Calendar {resource} response body: {error}")
+        })?;
+        serde_json::from_slice(&body).map_err(|error| {
+            format!(
+                "failed to parse Google Calendar {resource}: {error}\nResponse body:\n{}",
+                String::from_utf8_lossy(&body)
+            )
+        })
+    }
+
+    async fn list_events_with_token(
+        &self,
+        url: reqwest::Url,
+        token: &str,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<FetchedEvent>, String> {
+        let query = [
+            ("timeMin", from.to_rfc3339()),
+            ("timeMax", to.to_rfc3339()),
+            ("singleEvents", "true".to_string()),
+        ];
+        let mut events = Vec::new();
+        let mut page_token = None;
+        let mut seen_tokens = BTreeSet::new();
+        loop {
+            let mut request = self
+                .client
+                .get(url.clone())
+                .bearer_auth(token)
+                .query(&query);
+            if let Some(page_token) = &page_token {
+                request = request.query(&[("pageToken", page_token)]);
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|error| format!("failed to list Google Calendar events: {error}"))?;
+            if !response.status().is_success() {
+                return Err(Self::response_error(response).await);
+            }
+            let page: ListedEvents = Self::parse_response(response, "events").await?;
+            for event in page.items {
+                if event.status.as_deref() != Some("cancelled") && event.has_date_times() {
+                    events.push(FetchedEvent::try_from(event)?);
+                }
+            }
+            page_token = page.next_page_token.filter(|token| !token.is_empty());
+            let Some(next) = &page_token else {
+                return Ok(events);
+            };
+            if !seen_tokens.insert(next.clone()) {
+                return Err("Google Calendar returned a repeated nextPageToken".into());
+            }
+        }
+    }
+
+    async fn get_event_with_token(
+        &self,
+        url: reqwest::Url,
+        token: &str,
+    ) -> Result<Option<FetchedEvent>, String> {
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("failed to get Google Calendar event: {error}"))?;
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+        ) {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(Self::response_error(response).await);
+        }
+        let event: ListedEvent = Self::parse_response(response, "event").await?;
+        if event.status.as_deref() == Some("cancelled") || !event.has_date_times() {
+            return Ok(None);
+        }
+        FetchedEvent::try_from(event).map(Some)
     }
 }
 
@@ -237,6 +331,8 @@ struct CreatedEvent {
 struct ListedEvents {
     #[serde(default)]
     items: Vec<ListedEvent>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -246,24 +342,54 @@ struct ListedEvent {
     summary: String,
     #[serde(rename = "colorId")]
     color_id: Option<String>,
-    start: GoogleEventTime,
-    end: GoogleEventTime,
+    start: Option<ListedEventTime>,
+    end: Option<ListedEventTime>,
+    status: Option<String>,
     #[serde(default)]
     transparency: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ListedEventTime {
+    #[serde(rename = "dateTime")]
+    date_time: Option<String>,
+}
+
+impl ListedEvent {
+    fn has_date_times(&self) -> bool {
+        // Date-only (single- or multi-day) events cannot become timed Tasks.
+        self.start
+            .as_ref()
+            .and_then(|time| time.date_time.as_ref())
+            .is_some()
+            && self
+                .end
+                .as_ref()
+                .and_then(|time| time.date_time.as_ref())
+                .is_some()
+    }
 }
 
 impl TryFrom<ListedEvent> for FetchedEvent {
     type Error = String;
 
     fn try_from(event: ListedEvent) -> Result<Self, Self::Error> {
+        let start = event
+            .start
+            .and_then(|time| time.date_time)
+            .ok_or("Google Calendar event has no start dateTime")?;
+        let end = event
+            .end
+            .and_then(|time| time.date_time)
+            .ok_or("Google Calendar event has no end dateTime")?;
         Ok(Self {
             id: event.id,
             summary: event.summary,
             color_id: event.color_id,
-            start: DateTime::parse_from_rfc3339(&event.start.date_time)
+            start: DateTime::parse_from_rfc3339(&start)
                 .map_err(|error| format!("invalid Google Calendar start dateTime: {error}"))?
                 .with_timezone(&Utc),
-            end: DateTime::parse_from_rfc3339(&event.end.date_time)
+            end: DateTime::parse_from_rfc3339(&end)
                 .map_err(|error| format!("invalid Google Calendar end dateTime: {error}"))?
                 .with_timezone(&Utc),
             transparent: event.transparency.as_deref() == Some("transparent"),
@@ -310,41 +436,71 @@ impl CalendarTransport for GoogleCalendarTransport {
         Ok(())
     }
 
-    /// Compiled but not exercised by automated tests; live behavior is verified
-    /// by the operator against Google Calendar.
     async fn list_events(
         &self,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> Result<Vec<FetchedEvent>, String> {
         let token = self.access_token().await?;
-        let query = [
-            ("timeMin", from.to_rfc3339()),
-            ("timeMax", to.to_rfc3339()),
-            ("singleEvents", "true".to_string()),
-        ];
-        let response = self
-            .client
-            .get(self.event_url(None))
-            .bearer_auth(token)
-            .query(&query)
-            .send()
+        self.list_events_with_token(self.event_url(None), &token, from, to)
             .await
-            .map_err(|error| format!("failed to list Google Calendar events: {error}"))?;
-        if !response.status().is_success() {
-            return Err(Self::response_error(response).await);
-        }
-
-        let events = response
-            .json::<ListedEvents>()
-            .await
-            .map_err(|error| format!("failed to parse Google Calendar events: {error}"))?;
-        events
-            .items
-            .into_iter()
-            .map(FetchedEvent::try_from)
-            .collect()
     }
+
+    async fn get_event(&self, event_id: &str) -> Result<Option<FetchedEvent>, String> {
+        let token = self.access_token().await?;
+        self.get_event_with_token(self.event_url(Some(event_id)), &token)
+            .await
+    }
+}
+
+/// Always include the last 24 hours and the next calendar month. Explicit
+/// bounds may widen this window, but cannot shorten either minimum.
+pub fn calendar_import_window(
+    now: DateTime<Utc>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<TimeWindow, String> {
+    let start = from.unwrap_or(now).min(now - Duration::hours(24));
+    let minimum_end = now
+        .checked_add_months(Months::new(1))
+        .ok_or("calendar import month look-ahead exceeds the supported date range")?;
+    let end = to.unwrap_or(minimum_end);
+    if end <= start {
+        return Err("calendar import --to must be after the effective --from".into());
+    }
+    Ok(TimeWindow {
+        start,
+        end: end.max(minimum_end),
+    })
+}
+
+/// Discover events in the import window, then retrieve any missing linked,
+/// unfinished dynamic tasks by ID, even if their events moved outside it.
+/// Fetching finishes before the caller mutates or saves the store.
+pub async fn fetch_import_events<T: CalendarTransport>(
+    store: &Store,
+    transport: &T,
+    window: &TimeWindow,
+) -> Result<Vec<FetchedEvent>, String> {
+    let mut events: BTreeMap<_, _> = transport
+        .list_events(window.start, window.end)
+        .await?
+        .into_iter()
+        .map(|event| (event.id.clone(), event))
+        .collect();
+    for (task_id, event_id) in &store.calendar_links {
+        let Some(task) = store.tasks.get(task_id) else {
+            continue;
+        };
+        if task.pinned.is_some() || task.status == TaskStatus::Done || events.contains_key(event_id)
+        {
+            continue;
+        }
+        if let Some(event) = transport.get_event(event_id).await? {
+            events.insert(event.id.clone(), event);
+        }
+    }
+    Ok(events.into_values().collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,6 +574,7 @@ pub async fn export_plan<T: CalendarTransport>(
 pub struct ImportReport {
     pub captured: usize,
     pub completed: usize,
+    pub reopened: usize,
     pub moved: usize,
     pub resized: usize,
 }
@@ -439,6 +596,7 @@ pub fn import_from_calendar(
     let mut report = ImportReport {
         captured: 0,
         completed: 0,
+        reopened: 0,
         moved: 0,
         resized: 0,
     };
@@ -457,6 +615,29 @@ pub fn import_from_calendar(
                     entries.push(log_actual(task_id, ActualStatus::Done, Some(window), now));
                     report.completed += 1;
                 } else {
+                    if event.color_id.is_none()
+                        && task.status == TaskStatus::Done
+                        && event.end > now - Duration::hours(24)
+                    {
+                        // Only undo a Calendar completion (which records an
+                        // actual window), not a CLI `done` fact with no window.
+                        let latest_actual = store.log.iter().enumerate().filter(|(_, entry)| {
+                            matches!(&entry.kind, LogEntryKind::Fact(FactKind::Actual { item_id, .. }) if *item_id == task_id)
+                        }).max_by_key(|(index, entry)| (entry.at, *index)).map(|(_, entry)| entry);
+                        if let Some(completion) = latest_actual.filter(|entry| {
+                            matches!(
+                                entry.kind,
+                                LogEntryKind::Fact(FactKind::Actual {
+                                    status: ActualStatus::Done,
+                                    actual: Some(_),
+                                    ..
+                                })
+                            )
+                        }) {
+                            entries.push(log_undo_completion(task_id, completion.id, now));
+                            report.reopened += 1;
+                        }
+                    }
                     let new_dur = window.end - window.start;
                     if new_dur > chrono::Duration::zero() && new_dur != task.est_duration {
                         entries.push(log_edit_duration(task_id, new_dur, now));
@@ -508,6 +689,15 @@ pub fn import_from_calendar(
     }
 
     reconcile(store, &entries).expect("calendar import entries must reference known tasks");
+    for entry in &entries {
+        if let LogEntryKind::Command(ubu_core::CommandKind::UndoCompletion { task_id, .. }) =
+            &entry.kind
+        {
+            // Replanning must refresh the Calendar event after undo; a cached
+            // signature from before completion must not suppress that export.
+            store.export_signatures.remove(task_id);
+        }
+    }
     for (task_id, event_id) in captured_links {
         store.upsert_calendar_link(task_id, event_id);
     }
@@ -534,6 +724,9 @@ struct StubTransport {
     create_error: Option<String>,
     update_error: Option<String>,
     listed_events: Vec<FetchedEvent>,
+    filter_dates: bool,
+    get_calls: std::cell::RefCell<Vec<String>>,
+    get_error: Option<String>,
 }
 
 #[cfg(test)]
@@ -589,12 +782,32 @@ impl CalendarTransport for StubTransport {
 
     async fn list_events(
         &self,
-        _from: DateTime<Utc>,
-        _to: DateTime<Utc>,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
     ) -> Result<Vec<FetchedEvent>, String> {
-        Ok(self.listed_events.clone())
+        Ok(self
+            .listed_events
+            .iter()
+            .filter(|event| !self.filter_dates || (event.end > from && event.start < to))
+            .cloned()
+            .collect())
+    }
+
+    async fn get_event(&self, event_id: &str) -> Result<Option<FetchedEvent>, String> {
+        self.get_calls.borrow_mut().push(event_id.into());
+        if let Some(error) = &self.get_error {
+            return Err(error.clone());
+        }
+        Ok(self
+            .listed_events
+            .iter()
+            .find(|event| event.id == event_id)
+            .cloned())
     }
 }
+
+#[cfg(test)]
+mod import_tests;
 
 #[cfg(test)]
 mod stub_tests {
@@ -828,12 +1041,13 @@ mod stub_tests {
             id: "event".to_string(),
             summary: "Summary".to_string(),
             color_id: None,
-            start: GoogleEventTime {
-                date_time: at(0).to_rfc3339(),
-            },
-            end: GoogleEventTime {
-                date_time: at(30).to_rfc3339(),
-            },
+            start: Some(ListedEventTime {
+                date_time: Some(at(0).to_rfc3339()),
+            }),
+            end: Some(ListedEventTime {
+                date_time: Some(at(30).to_rfc3339()),
+            }),
+            status: None,
             transparency: transparency.map(str::to_owned),
         };
 
@@ -850,15 +1064,21 @@ mod stub_tests {
         assert!(!FetchedEvent::try_from(listed(None)).unwrap().transparent);
     }
 
-    fn id(value: u128) -> Id {
+    pub(super) fn id(value: u128) -> Id {
         Id::from_u128(value)
     }
 
-    fn at(minutes: i64) -> DateTime<Utc> {
+    pub(super) fn at(minutes: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(minutes * 60, 0).unwrap()
     }
 
-    fn task(value: u128, title: &str, tier: Tier, pinned: bool, category: Option<&str>) -> Task {
+    pub(super) fn task(
+        value: u128,
+        title: &str,
+        tier: Tier,
+        pinned: bool,
+        category: Option<&str>,
+    ) -> Task {
         Task {
             id: id(value),
             tier,
@@ -914,7 +1134,7 @@ mod stub_tests {
         }
     }
 
-    fn fetched_event(
+    pub(super) fn fetched_event(
         event_id: &str,
         summary: &str,
         color_id: Option<&str>,
@@ -1405,6 +1625,7 @@ mod stub_tests {
             ImportReport {
                 captured: 1,
                 completed: 0,
+                reopened: 0,
                 moved: 0,
                 resized: 0,
             }
@@ -1556,13 +1777,7 @@ mod stub_tests {
         store.upsert_task(dynamic);
         store.upsert_calendar_link(task_id, "owned-dynamic".to_string());
         for end_minutes in [60, 30] {
-            let event = fetched_event(
-                "owned-dynamic",
-                "Dynamic",
-                None,
-                60,
-                end_minutes,
-            );
+            let event = fetched_event("owned-dynamic", "Dynamic", None, 60, end_minutes);
             let report = import_from_calendar(
                 &mut store,
                 &[event],
@@ -1660,6 +1875,7 @@ mod stub_tests {
             ImportReport {
                 captured: 2,
                 completed: 1,
+                reopened: 0,
                 moved: 1,
                 resized: 0,
             }
@@ -1673,6 +1889,7 @@ mod stub_tests {
             ImportReport {
                 captured: 0,
                 completed: 0,
+                reopened: 0,
                 moved: 0,
                 resized: 0,
             }

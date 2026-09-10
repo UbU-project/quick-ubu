@@ -174,13 +174,44 @@ pub fn generate_routine_tasks(
     days: u32,
     tz: Tz,
 ) -> GenerateReport {
+    generate_routine_tasks_with_daily_start(store, from, days, tz, NaiveDate::MIN)
+}
+
+/// Generate within the requested window, excluding daily occurrences before
+/// `daily_start`. Other recurrence types retain their normal date matching.
+pub fn generate_routine_tasks_with_daily_start(
+    store: &mut Store,
+    from: NaiveDate,
+    days: u32,
+    tz: Tz,
+    daily_start: NaiveDate,
+) -> GenerateReport {
     let templates: Vec<RoutineTemplate> = store.routines().values().cloned().collect();
     let mut report = GenerateReport {
         created: 0,
         skipped: 0,
     };
 
-    for task in expand_routine(&templates, from, days, tz) {
+    let tasks = templates.iter().flat_map(|template| {
+        let excluded_days = if template.recurrence == Recurrence::Daily {
+            (daily_start - from).num_days().clamp(0, i64::from(days)) as u32
+        } else {
+            0
+        };
+        if excluded_days == days {
+            return Vec::new();
+        }
+        let Some(template_from) = from.checked_add_days(Days::new(u64::from(excluded_days))) else {
+            return Vec::new();
+        };
+        expand_routine(
+            std::slice::from_ref(template),
+            template_from,
+            days - excluded_days,
+            tz,
+        )
+    });
+    for task in tasks {
         if store.tasks.contains_key(&task.id) {
             report.skipped += 1;
         } else {

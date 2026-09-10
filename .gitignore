@@ -4,3 +4,4 @@ credentials.json
 token-cache.json
 quick-ubu-store.json
 routine.json
+tests/__pycache__/*.pyc

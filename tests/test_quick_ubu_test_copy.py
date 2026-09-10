@@ -122,12 +122,14 @@ class ResetAndCopyTests(unittest.TestCase):
             reset_and_copy(source, destination, self.store, self.start)
         self.assert_untouched(source, destination)
 
-    def test_exact_marker_on_later_page_outside_window_allows_dynamic_copy_only(self):
+    def test_exact_marker_on_later_page_outside_window_allows_all_colors(self):
         dynamic = self.event("dynamic", description="Notes", reminders={"useDefault": True})
         null_color = self.event("null", colorId=None)
+        colored = self.event("fixed", colorId="3")
+        empty_color = self.event("empty-color", colorId="")
         source = Calendar(event_pages=[
-            {"items": [dynamic, self.event("fixed", colorId="3")], "nextPageToken": "1"},
-            {"items": [null_color, self.event("empty-color", colorId="")]},
+            {"items": [dynamic, colored], "nextPageToken": "1"},
+            {"items": [null_color, empty_color]},
         ])
         destination = Calendar(
             marker_pages=[
@@ -143,14 +145,18 @@ class ResetAndCopyTests(unittest.TestCase):
         self.assertFalse(self.store.exists())
         self.assertEqual(destination.deletes, ["old-dynamic", "old-fixed"])
         self.assertEqual(destination.inserts, [
-            {key: value for key, value in event.items() if key not in ("id", "colorId")}
-            for event in [dynamic, null_color]
+            {key: value for key, value in dynamic.items() if key != "id"},
+            {key: value for key, value in colored.items() if key != "id"},
+            {key: value for key, value in null_color.items() if key not in ("id", "colorId")},
+            {key: value for key, value in empty_color.items() if key not in ("id", "colorId")},
         ])
-        self.assertEqual(report["copied"], 2)
+        self.assertEqual(report["copied"], 4)
         self.assertEqual(report["deleted"], 2)
         self.assertEqual(report["events"], [
             {"source_id": "dynamic", "destination_id": "copy-1"},
-            {"source_id": "null", "destination_id": "copy-2"},
+            {"source_id": "fixed", "destination_id": "copy-2"},
+            {"source_id": "null", "destination_id": "copy-3"},
+            {"source_id": "empty-color", "destination_id": "copy-4"},
         ])
         for method, query in destination.calls:
             if method == "list" and "q" in query:
@@ -173,25 +179,32 @@ class ResetAndCopyTests(unittest.TestCase):
                     reset_and_copy(source, destination, self.store, self.start)
                 self.assert_untouched(source, destination)
 
-    def test_deletion_spans_yesterday_to_fourteen_days_from_now_independent_of_copy_start(self):
+    def test_deletion_spans_yesterday_and_all_future_pages_independent_of_copy_start(self):
         now = self.start + timedelta(days=3)
         source = Calendar(event_pages=[{"items": [self.event("new")]}])
         destination = Calendar(
             marker_pages=[{"items": [self.marker()]}],
-            event_pages=[{"items": [self.event(
-                "yesterday", start={"dateTime": (now - timedelta(hours=12)).isoformat()},
-                end={"dateTime": (now - timedelta(hours=11)).isoformat()},
-            )]}],
+            event_pages=[
+                {"items": [self.event(
+                    "yesterday", start={"dateTime": (now - timedelta(hours=12)).isoformat()},
+                    end={"dateTime": (now - timedelta(hours=11)).isoformat()},
+                )], "nextPageToken": "1"},
+                {"items": [self.event(
+                    f"future-{days}", start={"dateTime": (now + timedelta(days=days)).isoformat()},
+                    end={"dateTime": (now + timedelta(days=days, hours=1)).isoformat()},
+                ) for days in [19, 365]]},
+            ],
         )
         report = reset_and_copy(source, destination, self.store, self.start, now=now)
         deletion_queries = [query for method, query in destination.calls
                             if method == "list" and "q" not in query]
-        self.assertEqual(len(deletion_queries), 1)
-        self.assertEqual(deletion_queries[0]["timeMin"], (now - timedelta(hours=24)).isoformat())
-        self.assertEqual(deletion_queries[0]["timeMax"], (now + timedelta(days=14)).isoformat())
-        self.assertEqual(destination.deletes, ["yesterday"])
+        self.assertEqual(len(deletion_queries), 2)
+        for query in deletion_queries:
+            self.assertEqual(query["timeMin"], (now - timedelta(hours=24)).isoformat())
+            self.assertNotIn("timeMax", query)
+        self.assertEqual(destination.deletes, ["yesterday", "future-19", "future-365"])
         self.assertEqual(report["delete_from"], deletion_queries[0]["timeMin"])
-        self.assertEqual(report["delete_to"], deletion_queries[0]["timeMax"])
+        self.assertIsNone(report["delete_to"])
         self.assertEqual(report["from"], self.start.isoformat())
         self.assertEqual(report["to"], (self.start + timedelta(days=14)).isoformat())
         for method, query in source.calls:
@@ -209,6 +222,24 @@ class ResetAndCopyTests(unittest.TestCase):
         destination = Calendar(marker_pages=[{"items": [self.marker()]}])
         report = reset_and_copy(source, destination, self.store, self.start)
         self.assertEqual(report["events"], [{"source_id": "boundary", "destination_id": "copy-1"}])
+
+    def test_all_day_events_keep_dates_and_colors_within_fourteen_day_window(self):
+        events = [self.event(
+            str(day),
+            start={"date": (self.start + timedelta(days=day)).date().isoformat()},
+            end={"date": (self.start + timedelta(days=day + 1)).date().isoformat()},
+            **({"colorId": "5"} if day == 0 else {}),
+        ) for day in [-1, 0, 13, 14]]
+        source = Calendar(event_pages=[{"items": events}])
+        destination = Calendar(marker_pages=[{"items": [self.marker()]}])
+        report = reset_and_copy(
+            source, destination, self.store, self.start + timedelta(hours=12),
+        )
+        self.assertEqual(report["copied"], 2)
+        self.assertEqual(destination.inserts, [
+            {key: value for key, value in event.items() if key != "id"}
+            for event in events[1:3]
+        ])
 
     def test_copy_preserves_content_and_omits_google_identity(self):
         original = self.event(
@@ -283,7 +314,7 @@ class ResetAndCopyTests(unittest.TestCase):
         destination = Calendar()
         source = Calendar()
         stderr = io.StringIO()
-        with patch("quick_ubu_test_copy.calendar_service", side_effect=[destination, source]), \
+        with patch("tests.quick_ubu_test_copy.calendar_service", side_effect=[destination, source]), \
                 patch("sys.stderr", stderr):
             result = main([
                 "--source-credentials", "main-credentials.json", "--source-token", "main-token.pickle",
