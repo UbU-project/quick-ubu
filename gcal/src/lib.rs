@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Duration, Months, Utc};
 use serde::{Deserialize, Serialize};
 use ubu_core::{
-    log_actual, log_capture, log_edit_duration, log_edit_pin, log_undo_completion, reconcile,
+    log_actual, log_capture, log_edit_duration, log_edit_pin, log_remove_task, log_undo_completion, reconcile,
     visible_as_content, ActualStatus, DeferPolicy, FactKind, Id, LogEntryKind, Plan, Provenance,
     Store, Task, TaskStatus, Tier, TimeWindow,
 };
@@ -581,6 +581,7 @@ pub async fn export_plan<T: CalendarTransport>(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImportReport {
+    pub removed: usize,
     pub captured: usize,
     pub completed: usize,
     pub reopened: usize,
@@ -591,6 +592,7 @@ pub struct ImportReport {
 pub fn import_from_calendar(
     store: &mut Store,
     events: &[FetchedEvent],
+    deleted: &[Id],
     now: DateTime<Utc>,
     captured_tier: Tier,
     color_to_category: &BTreeMap<String, String>,
@@ -603,6 +605,7 @@ pub fn import_from_calendar(
     let mut entries = Vec::new();
     let mut captured_links = Vec::new();
     let mut report = ImportReport {
+        removed: 0,
         captured: 0,
         completed: 0,
         reopened: 0,
@@ -697,6 +700,12 @@ pub fn import_from_calendar(
         report.captured += 1;
     }
 
+    for task_id in deleted.iter().copied().collect::<BTreeSet<_>>() {
+        if store.tasks.contains_key(&task_id) {
+            entries.push(log_remove_task(task_id, now));
+            report.removed += 1;
+        }
+    }
     reconcile(store, &entries).expect("calendar import entries must reference known tasks");
     for entry in &entries {
         if let LogEntryKind::Command(ubu_core::CommandKind::UndoCompletion { task_id, .. }) =
@@ -1606,6 +1615,7 @@ mod stub_tests {
         let report = import_from_calendar(
             &mut store,
             std::slice::from_ref(&event),
+            &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
@@ -1624,6 +1634,7 @@ mod stub_tests {
         let report = import_from_calendar(
             &mut store,
             std::slice::from_ref(&event),
+            &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
@@ -1632,6 +1643,7 @@ mod stub_tests {
         assert_eq!(
             report,
             ImportReport {
+                removed: 0,
                 captured: 1,
                 completed: 0,
                 reopened: 0,
@@ -1658,6 +1670,7 @@ mod stub_tests {
         let report = import_from_calendar(
             &mut store,
             std::slice::from_ref(&event),
+            &[],
             at(0),
             Tier::UserShared,
             &colors,
@@ -1690,6 +1703,7 @@ mod stub_tests {
         let report = import_from_calendar(
             &mut store,
             &[event],
+            &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
@@ -1713,6 +1727,7 @@ mod stub_tests {
         let report = import_from_calendar(
             &mut store,
             &[event],
+            &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
@@ -1762,6 +1777,7 @@ mod stub_tests {
         let report = import_from_calendar(
             &mut store,
             &[event],
+            &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
@@ -1790,6 +1806,7 @@ mod stub_tests {
             let report = import_from_calendar(
                 &mut store,
                 &[event],
+                &[],
                 at(0),
                 Tier::UserShared,
                 &BTreeMap::new(),
@@ -1813,6 +1830,7 @@ mod stub_tests {
         let report = import_from_calendar(
             &mut store,
             &[event],
+            &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
@@ -1839,6 +1857,7 @@ mod stub_tests {
         let report = import_from_calendar(
             &mut store,
             &[event],
+            &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
@@ -1878,10 +1897,11 @@ mod stub_tests {
         ];
         let colors = BTreeMap::from([("5".to_string(), "personal".to_string())]);
 
-        let first = import_from_calendar(&mut store, &events, at(0), Tier::UserShared, &colors);
+        let first = import_from_calendar(&mut store, &events, &[], at(0), Tier::UserShared, &colors);
         assert_eq!(
             first,
             ImportReport {
+                removed: 0,
                 captured: 2,
                 completed: 1,
                 reopened: 0,
@@ -1891,11 +1911,12 @@ mod stub_tests {
         );
         let after_first = store.clone();
 
-        let second = import_from_calendar(&mut store, &events, at(1), Tier::UserShared, &colors);
+        let second = import_from_calendar(&mut store, &events, &[], at(1), Tier::UserShared, &colors);
 
         assert_eq!(
             second,
             ImportReport {
+                removed: 0,
                 captured: 0,
                 completed: 0,
                 reopened: 0,

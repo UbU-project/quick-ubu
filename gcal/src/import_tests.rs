@@ -16,6 +16,7 @@ fn import(store: &mut Store, event: &FetchedEvent, now: DateTime<Utc>) -> Import
     import_from_calendar(
         store,
         std::slice::from_ref(event),
+        &[],
         now,
         Tier::UserShared,
         &BTreeMap::new(),
@@ -75,6 +76,7 @@ async fn linked_unfinished_events_are_imported_regardless_of_date() {
         let report = import_from_calendar(
             &mut store,
             &events,
+            &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
@@ -136,6 +138,7 @@ async fn import_discovers_unlinked_events_beyond_the_old_seven_day_window() {
     let report = import_from_calendar(
         &mut store,
         &events,
+        &[],
         at(0),
         Tier::UserShared,
         &BTreeMap::new(),
@@ -380,6 +383,7 @@ async fn import_skips_untimed_events_and_continues_through_pages() {
     let report = import_from_calendar(
         &mut store,
         &events,
+        &[],
         at(0),
         Tier::UserShared,
         &BTreeMap::new(),
@@ -502,6 +506,7 @@ async fn pagination_imports_completion_on_a_later_page_even_after_an_empty_page(
     let report = import_from_calendar(
         &mut store,
         &events,
+        &[],
         at(0),
         Tier::UserShared,
         &BTreeMap::new(),

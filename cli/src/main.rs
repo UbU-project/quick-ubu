@@ -502,14 +502,15 @@ fn run(cli: Cli) -> Result<(), String> {
             let report = import_from_calendar(
                 &mut store,
                 &fetched.events,
+                &fetched.deleted,
                 now,
                 Tier::UserShared,
                 &color_to_category,
             );
             persist::save(&cli.store, &store)?;
             println!(
-                "captured {}, completed {}, reopened {}, moved {}, resized {}",
-                report.captured, report.completed, report.reopened, report.moved, report.resized
+                "captured {}, completed {}, reopened {}, moved {}, resized {}, removed {}",
+                report.captured, report.completed, report.reopened, report.moved, report.resized, report.removed
             );
         }
     }
@@ -906,6 +907,7 @@ mod tests {
             let report = import_from_calendar(
                 &mut store,
                 std::slice::from_ref(&event),
+                &[],
                 now,
                 Tier::UserShared,
                 &inverse,
