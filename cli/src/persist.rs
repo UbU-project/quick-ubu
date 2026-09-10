@@ -4,6 +4,26 @@ use std::path::{Path, PathBuf};
 
 use ubu_core::{Id, Store};
 
+pub trait StorageBackend {
+    fn load(&self) -> Result<Store, String>;
+    fn save(&self, store: &Store) -> Result<(), String>;
+}
+
+/// Retained JSON backend for compatibility tests and callers of the storage trait.
+pub struct JsonBackend {
+    pub path: PathBuf,
+}
+
+impl StorageBackend for JsonBackend {
+    fn load(&self) -> Result<Store, String> {
+        load(&self.path)
+    }
+
+    fn save(&self, store: &Store) -> Result<(), String> {
+        save(&self.path, store)
+    }
+}
+
 pub fn load(path: &Path) -> Result<Store, String> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -87,8 +107,9 @@ mod tests {
 
         let directory = std::env::temp_dir().join(format!("quick-ubu-{}", Uuid::new_v4()));
         let path = directory.join("nested/store.json");
-        save(&path, &store).expect("store should save");
-        let loaded = load(&path).expect("store should load");
+        let backend = JsonBackend { path };
+        backend.save(&store).expect("store should save");
+        let loaded = backend.load().expect("store should load");
 
         assert_eq!(loaded, store);
         std::fs::remove_dir_all(directory).expect("temporary directory should be removable");
