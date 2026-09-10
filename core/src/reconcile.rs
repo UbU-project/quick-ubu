@@ -16,6 +16,14 @@ pub fn log_defer(handle_id: Id, at: DateTime<Utc>) -> LogEntry {
     }
 }
 
+pub fn log_remove_task(task_id: Id, at: DateTime<Utc>) -> LogEntry {
+    LogEntry {
+        id: Uuid::new_v4(),
+        kind: LogEntryKind::Command(CommandKind::RemoveTask { task_id }),
+        at,
+    }
+}
+
 pub fn log_actual(
     item_id: Id,
     status: ActualStatus,
@@ -109,6 +117,11 @@ pub fn reconcile(store: &mut Store, log: &[LogEntry]) -> Result<(), CoreError> {
 
     for entry in ordered {
         match &entry.kind {
+            LogEntryKind::Command(CommandKind::RemoveTask { task_id }) => {
+                store.tasks.remove(task_id);
+                store.calendar_links.remove(task_id);
+                store.export_signatures.remove(task_id);
+            }
             LogEntryKind::Command(CommandKind::UndoCompletion { task_id, .. }) => {
                 let task = store
                     .tasks
