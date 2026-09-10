@@ -20,11 +20,12 @@ use ubu_core::{
 
 mod logic;
 mod persist;
+use persist::{SqliteBackend, StorageBackend};
 
 #[derive(Debug, Parser)]
 #[command(name = "quick-ubu")]
 struct Cli {
-    #[arg(long, default_value = "quick-ubu-store.json", global = true)]
+    #[arg(long, default_value = "quick-ubu-store.db", global = true)]
     store: PathBuf,
 
     #[command(subcommand)]
@@ -229,7 +230,12 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), String> {
-    let mut store = persist::load(&cli.store)?;
+    let backend = SqliteBackend::open(&cli.store)?;
+    run_with_backend(cli, &backend)
+}
+
+fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String> {
+    let mut store = backend.load()?;
 
     match cli.command {
         Command::Add(args) => {
@@ -250,7 +256,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     blocked_by_prefixes: args.blocked_by,
                 },
             )?;
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
             println!("{id}");
         }
         Command::List => {
@@ -273,7 +279,7 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Done { prefix } => {
             logic::done(&mut store, &prefix, Utc::now())?;
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
         }
         Command::Report(args) => {
             let window = logic::report_window(
@@ -287,19 +293,19 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Defer { prefix } => {
             logic::defer(&mut store, &prefix)?;
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
         }
         Command::DepAdd { task, blocker } => {
             logic::dep_add(&mut store, &task, &blocker)?;
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
         }
         Command::DepRm { task, blocker } => {
             logic::dep_rm(&mut store, &task, &blocker)?;
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
         }
         Command::DepSet { task, blockers } => {
             logic::dep_set(&mut store, &task, blockers)?;
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
         }
         Command::DepList { task } => {
             for (task_id, title, blockers) in logic::dep_list(&store, task)? {
@@ -308,11 +314,11 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Command::PrefAdd { a, b, eq } => {
             logic::pref_add(&mut store, &a, &b, eq)?;
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
         }
         Command::PrefRm { a, b } => {
             logic::pref_rm(&mut store, &a, &b)?;
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
         }
         Command::PrefList => {
             for line in logic::pref_list(&store) {
@@ -321,13 +327,13 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Review => {
             review_decisions(&mut store)?;
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
         }
         Command::Prioritize => {
             let added = logic::enqueue_incomparable_pairs(&mut store);
             println!("enqueued {added}");
             review_decisions(&mut store)?;
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
         }
         Command::ObjectiveAdd(args) => {
             let id = logic::objective_add(
@@ -338,16 +344,16 @@ fn run(cli: Cli) -> Result<(), String> {
                     target_date: parse_optional_datetime(args.target_date)?,
                 },
             );
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
             println!("{id}");
         }
         Command::SetModel { name } => {
             logic::set_model(&mut store, name);
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
         }
         Command::SetColor { category, color_id } => {
             store.set_category_color(category, color_id);
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
         }
         Command::ColorList => {
             for (category, color_id) in effective_color_map(&store, None)? {
@@ -368,7 +374,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 total_timeout_secs: ollama_total_timeout,
             };
             let report = logic::advise(&mut store, &transport, Some(resolved_model))?;
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
             println!(
                 "enqueued {}, dropped_known {}, dropped_cycle {}",
                 report.enqueued, report.dropped_known, report.dropped_cycle
@@ -419,7 +425,7 @@ fn run(cli: Cli) -> Result<(), String> {
             for routine in routines {
                 store.upsert_routine(routine);
             }
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
             println!("imported {imported}");
         }
         Command::RoutineList => {
@@ -450,7 +456,7 @@ fn run(cli: Cli) -> Result<(), String> {
             let daily_start = NaiveDate::from_ymd_opt(2026, 9, 11).unwrap();
             let report =
                 generate_routine_tasks_with_daily_start(&mut store, from, args.days, tz, daily_start);
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
             println!("created {}, skipped {}", report.created, report.skipped);
         }
         Command::Export(args) => {
@@ -477,7 +483,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 &color_map,
                 Tier::UserShared,
             ))?;
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
             println!("created {}, updated {}", report.created, report.updated);
         }
         Command::Import(args) => {
@@ -507,7 +513,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 Tier::UserShared,
                 &color_to_category,
             );
-            persist::save(&cli.store, &store)?;
+            backend.save(&store)?;
             println!(
                 "captured {}, completed {}, reopened {}, moved {}, resized {}, removed {}",
                 report.captured, report.completed, report.reopened, report.moved, report.resized, report.removed
