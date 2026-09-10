@@ -5,7 +5,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use ollama_planner::LlmTransport;
 use serde_json::{json, Value};
 use ubu_core::{
-    next_task, re_plan, resolve_preferences, topo_order, AffectBudget, Bundle, ComputeTarget,
+    next_task, re_plan, resolve_preferences, validate_temporal_dependencies, AfterConstraint, AffectBudget, Bundle, ComputeTarget,
     CoreError, DecisionRecord, DecisionSource, DeferPolicy, DeterministicPlacer, Id, Objective,
     ObjectiveStatus, PendingDecision, Plan, Planner, PrefSuggestion, Preference, Proposal,
     Provenance, Relation, Resolution, Store, Task, TaskStatus, Tier, TimeWindow,
@@ -594,6 +594,55 @@ pub fn dep_list(store: &Store, task_prefix: Option<String>) -> Result<Vec<Depend
         .collect())
 }
 
+/// A second add for the same reference replaces its offset.
+pub fn after_add(
+    store: &mut Store,
+    task_prefix: &str,
+    reference_prefix: &str,
+    offset_minutes: i64,
+) -> Result<(), String> {
+    let task_id = resolve_task_id(store, task_prefix)?;
+    let reference_id = resolve_task_id(store, reference_prefix)?;
+    reject_self_pair(task_id, reference_id, "after-reference")?;
+    let offset = Duration::try_minutes(offset_minutes)
+        .ok_or_else(|| "after offset minutes are out of range".to_string())?;
+    let mut after = store.tasks[&task_id].after.clone();
+    after.retain(|reference| reference.task_id != reference_id);
+    after.push(AfterConstraint { task_id: reference_id, offset });
+    commit_after(store, task_id, after)
+}
+
+pub fn after_rm(store: &mut Store, task_prefix: &str, reference_prefix: &str) -> Result<(), String> {
+    let task_id = resolve_task_id(store, task_prefix)?;
+    let reference_id = resolve_task_id(store, reference_prefix)?;
+    let mut after = store.tasks[&task_id].after.clone();
+    after.retain(|reference| reference.task_id != reference_id);
+    commit_after(store, task_id, after)
+}
+
+pub fn after_list(store: &Store, task_prefix: Option<String>) -> Result<Vec<String>, String> {
+    let tasks = match task_prefix {
+        Some(prefix) => vec![resolve_task_id(store, &prefix)?],
+        None => store.tasks.values().filter(|task| !task.after.is_empty())
+            .map(|task| task.id).collect(),
+    };
+    Ok(tasks.into_iter().map(|id| {
+        let task = &store.tasks[&id];
+        let references = task.after.iter().map(|reference| format!("{}: {}m",
+            short_task_id(reference.task_id), reference.offset.num_minutes()))
+            .collect::<Vec<_>>().join(", ");
+        format!("{}  {}  [{}]", short_task_id(id), task.title, references)
+    }).collect())
+}
+
+fn commit_after(store: &mut Store, task_id: Id, after: Vec<AfterConstraint>) -> Result<(), String> {
+    let mut proposed = store.clone();
+    proposed.tasks.get_mut(&task_id).expect("resolved task").after = after.clone();
+    validate_dependencies(&proposed)?;
+    store.tasks.get_mut(&task_id).expect("resolved task").after = after;
+    Ok(())
+}
+
 pub fn pref_add(store: &mut Store, a_prefix: &str, b_prefix: &str, eq: bool) -> Result<(), String> {
     let a = resolve_task_id(store, a_prefix)?;
     let b = resolve_task_id(store, b_prefix)?;
@@ -888,7 +937,7 @@ fn commit_dependencies(store: &mut Store, task_id: Id, blocked_by: Vec<Id>) -> R
 }
 
 fn validate_dependencies(store: &Store) -> Result<(), String> {
-    match topo_order(store) {
+    match validate_temporal_dependencies(store) {
         Ok(_) => Ok(()),
         Err(CoreError::DependencyCycle { involved }) => Err(format!(
             "dependency cycle involving tasks: {}",

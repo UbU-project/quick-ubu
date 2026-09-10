@@ -78,6 +78,20 @@ enum Command {
     DepList {
         task: Option<String>,
     },
+    /// Start a dynamic task after another task's scheduled end plus an offset.
+    AfterAdd {
+        task: String,
+        ref_task: String,
+        #[arg(allow_negative_numbers = true)]
+        offset_minutes: i64,
+    },
+    AfterRm {
+        task: String,
+        ref_task: String,
+    },
+    AfterList {
+        task: Option<String>,
+    },
     PrefAdd {
         a: String,
         b: String,
@@ -333,6 +347,19 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
         Command::DepList { task } => {
             for (task_id, title, blockers) in logic::dep_list(&store, task)? {
                 println!("{task_id}  {title}  [{}]", blockers.join(", "));
+            }
+        }
+        Command::AfterAdd { task, ref_task, offset_minutes } => {
+            logic::after_add(&mut store, &task, &ref_task, offset_minutes)?;
+            backend.save(&store)?;
+        }
+        Command::AfterRm { task, ref_task } => {
+            logic::after_rm(&mut store, &task, &ref_task)?;
+            backend.save(&store)?;
+        }
+        Command::AfterList { task } => {
+            for line in logic::after_list(&store, task)? {
+                println!("{line}");
             }
         }
         Command::PrefAdd { a, b, eq } => {
