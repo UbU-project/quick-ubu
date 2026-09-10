@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::store::Store;
-use crate::types::{DeferPolicy, Id, Provenance, Task, TaskStatus, Tier, TimeWindow};
+use crate::types::{AfterConstraint, DeferPolicy, Id, Provenance, Task, TaskStatus, Tier, TimeWindow};
 
 const NAMESPACE: Uuid = Uuid::from_u128(0x6f51_89f1_6208_5c1e_a8ec_15c0f894ea9d);
 
@@ -155,7 +155,13 @@ pub fn expand_routine(
                 pinned: Some(TimeWindow { start, end }),
                 transparent: template.transparent,
                 blocked_by: Vec::new(),
-                after: Vec::new(),
+                after: template.after.iter().map(|reference| AfterConstraint {
+                    task_id: Uuid::new_v5(
+                        &NAMESPACE,
+                        format!("{}|{}", reference.template_id, date).as_bytes(),
+                    ),
+                    offset: reference.offset,
+                }).collect(),
                 defer_policy: DeferPolicy::RescheduleAsap,
                 status: TaskStatus::Scheduled,
                 provenance: Provenance::Manual,
