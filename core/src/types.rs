@@ -86,6 +86,13 @@ pub struct Commitment {
     pub note: Option<String>,
 }
 
+/// Forward precedence and a start floor relative to a task's scheduled end.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AfterConstraint {
+    pub task_id: Id,
+    pub offset: chrono::Duration,
+}
+
 /// `PartialEq` only: `est_duration` is a `chrono::Duration`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
@@ -121,6 +128,8 @@ pub struct Task {
     pub reminders: Vec<i32>,
     /// precedence edges (dynamic)
     pub blocked_by: Vec<Id>,
+    #[serde(default)]
+    pub after: Vec<AfterConstraint>,
     pub defer_policy: DeferPolicy,
     pub status: TaskStatus,
     pub provenance: Provenance,

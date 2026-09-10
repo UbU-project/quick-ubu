@@ -747,6 +747,7 @@ pub fn import_from_calendar(
             pinned: is_commitment.then_some(window),
             transparent: event.transparent,
             blocked_by: Vec::new(),
+            after: Vec::new(),
             defer_policy: DeferPolicy::RescheduleAsap,
             status: if is_commitment {
                 TaskStatus::Scheduled
@@ -1063,6 +1064,7 @@ mod stub_tests {
             category: None,
             transparent: false,
             reminders: vec![10, 0],
+            after: Vec::new(),
             recurrence: ubu_core::Recurrence::Daily,
         };
         let mut store = Store::new();
@@ -1197,6 +1199,7 @@ mod stub_tests {
             }),
             transparent: false,
             blocked_by: Vec::new(),
+            after: Vec::new(),
             defer_policy: DeferPolicy::RescheduleAsap,
             status: TaskStatus::Scheduled,
             provenance: Provenance::Manual,

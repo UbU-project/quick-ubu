@@ -21,6 +21,7 @@ async fn confirmed_deleted_pinned_instance_is_removed_without_changing_its_routi
         category: None,
         transparent: false,
         reminders: vec![],
+        after: Vec::new(),
         recurrence: ubu_core::Recurrence::Daily,
     };
     store.upsert_routine(routine.clone());

@@ -49,6 +49,12 @@ where
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutineAfter {
+    pub template_id: Id,
+    pub offset: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutineTemplate {
     pub id: Id,
     pub title: String,
@@ -72,6 +78,8 @@ pub struct RoutineTemplate {
     #[serde(default)]
     pub reminders: Vec<i32>,
     pub recurrence: Recurrence,
+    #[serde(default)]
+    pub after: Vec<RoutineAfter>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +155,7 @@ pub fn expand_routine(
                 pinned: Some(TimeWindow { start, end }),
                 transparent: template.transparent,
                 blocked_by: Vec::new(),
+                after: Vec::new(),
                 defer_policy: DeferPolicy::RescheduleAsap,
                 status: TaskStatus::Scheduled,
                 provenance: Provenance::Manual,
@@ -252,6 +261,7 @@ mod tests {
             category: None,
             transparent: false,
             reminders: Vec::new(),
+            after: Vec::new(),
             recurrence,
         }
     }

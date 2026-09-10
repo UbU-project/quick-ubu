@@ -339,6 +339,7 @@ mod tests {
                 transparent: false,
                 reminders: vec![10, 0],
                 blocked_by: vec![],
+                after: Vec::new(),
                 defer_policy: DeferPolicy::ReturnToBacklog,
                 status: TaskStatus::Backlog,
                 provenance: Provenance::Manual,

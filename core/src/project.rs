@@ -105,6 +105,7 @@ mod tests {
             pinned: None,
             transparent: false,
             blocked_by: Vec::new(),
+            after: Vec::new(),
             defer_policy: DeferPolicy::ReturnToBacklog,
             status,
             provenance: Provenance::Manual,

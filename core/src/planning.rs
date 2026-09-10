@@ -403,6 +403,7 @@ mod tests {
             pinned: None,
             transparent: false,
             blocked_by,
+            after: Vec::new(),
             defer_policy: DeferPolicy::ReturnToBacklog,
             status,
             provenance: Provenance::Manual,

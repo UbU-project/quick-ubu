@@ -243,6 +243,7 @@ mod tests {
             pinned: None,
             transparent: false,
             blocked_by: Vec::new(),
+            after: Vec::new(),
             defer_policy,
             status: TaskStatus::Scheduled,
             provenance: Provenance::Manual,

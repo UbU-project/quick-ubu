@@ -110,6 +110,7 @@ mod tests {
             transparent: false,
             reminders: Vec::new(),
             blocked_by: Vec::new(),
+            after: Vec::new(),
             defer_policy: DeferPolicy::RescheduleAsap,
             status: TaskStatus::Backlog,
             provenance: Provenance::Manual,
