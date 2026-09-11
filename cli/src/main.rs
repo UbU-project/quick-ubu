@@ -862,6 +862,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn watch_parses_default_and_custom_calendar_options_without_io() {
+        let cli = Cli::try_parse_from(["quick-ubu", "watch"]).unwrap();
+        let Command::Watch(args) = cli.command else {
+            panic!("expected watch");
+        };
+        assert_eq!(args.interval, 60);
+        assert_eq!(args.calendar.calendar_id, "primary");
+        assert_eq!(args.calendar.credentials, PathBuf::from("credentials.json"));
+        assert_eq!(args.calendar.token_cache, PathBuf::from("token-cache.json"));
+        assert!(args.calendar.color_config.is_none());
+        let cli = Cli::try_parse_from([
+            "quick-ubu",
+            "watch",
+            "--interval",
+            "5",
+            "--credentials",
+            "auth.json",
+            "--token-cache",
+            "cache.json",
+            "--calendar-id",
+            "test",
+            "--color-config",
+            "colors.json",
+        ])
+        .unwrap();
+        let Command::Watch(args) = cli.command else {
+            panic!("expected watch");
+        };
+        assert_eq!(args.interval, 5);
+        assert_eq!(args.calendar.calendar_id, "test");
+        assert_eq!(args.calendar.credentials, PathBuf::from("auth.json"));
+        assert_eq!(args.calendar.token_cache, PathBuf::from("cache.json"));
+        assert_eq!(
+            args.calendar.color_config,
+            Some(PathBuf::from("colors.json"))
+        );
+        for invalid in ["0", "-1", "invalid"] {
+            assert!(Cli::try_parse_from(["quick-ubu", "watch", "--interval", invalid]).is_err());
+        }
+    }
+
+    #[test]
     fn store_defaults_to_sqlite_and_accepts_an_explicit_path() {
         assert_eq!(
             Cli::try_parse_from(["quick-ubu", "list"]).unwrap().store,

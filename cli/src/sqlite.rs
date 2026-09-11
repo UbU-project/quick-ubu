@@ -407,6 +407,10 @@ mod tests {
             .insert(id(2), "signature\nwith quotes: \"".into());
         store.category_colors.insert("work's 🗓".into(), "9".into());
         store.ollama_model = Some("local-model".into());
+        store.poll_snapshot.insert(
+            "calendar-event-雪".into(),
+            "fingerprint|with\nquotes: \"".into(),
+        );
         // The first two entries share a timestamp; their insertion order is meaningful.
         for (n, seconds) in [(30, 0), (29, 0), (28, 1)] {
             store.log.push(LogEntry {
@@ -418,6 +422,25 @@ mod tests {
             });
         }
         store
+    }
+
+    #[test]
+    fn legacy_sqlite_and_json_stores_without_poll_snapshot_load_empty() {
+        let backend = SqliteBackend::in_memory().unwrap();
+        let mut store = populated_store();
+        backend.save(&store).unwrap();
+        backend
+            .connection
+            .execute("DELETE FROM singletons WHERE key = 'poll_snapshot'", [])
+            .unwrap();
+        store.poll_snapshot.clear();
+        assert_eq!(backend.load().unwrap(), store);
+        let mut legacy = serde_json::to_value(&store).unwrap();
+        legacy.as_object_mut().unwrap().remove("poll_snapshot");
+        let path = Path::new("memory").join(format!("{}.json", Uuid::new_v4()));
+        crate::test_support::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let json = crate::persist::JsonBackend { path };
+        assert_eq!(json.load().unwrap(), store);
     }
 
     #[test]

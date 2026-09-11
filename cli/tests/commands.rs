@@ -639,7 +639,7 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
 }
 
 #[test]
-fn generate_blocks_daily_routines_before_launch_using_local_dates() {
+fn generate_daily_routines_uses_all_requested_local_dates_after_release() {
     let (directory, store_path) = memory_store();
     fs::create_dir_all(&directory).unwrap();
     let mut store = Store::new();
@@ -669,10 +669,10 @@ fn generate_blocks_daily_routines_before_launch_using_local_dates() {
         });
     }
     test_support::seed(&store_path, &store);
-    // Entirely before launch: monthly routines still generate, daily ones do not.
+    // The temporary launch gate was removed: all requested dates generate.
     for (days, expected) in [
-        ("2", "created 1, skipped 0\n"),
-        ("4", "created 2, skipped 1\n"),
+        ("2", "created 3, skipped 0\n"),
+        ("4", "created 2, skipped 3\n"),
     ] {
         let output = quick_ubu(
             &store_path,
@@ -690,7 +690,7 @@ fn generate_blocks_daily_routines_before_launch_using_local_dates() {
         assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
     }
     let store: Store = serde_json::from_str(&fs::read_to_string(&store_path).unwrap()).unwrap();
-    assert_eq!(store.tasks.len(), 3);
+    assert_eq!(store.tasks.len(), 5);
     let tz = ubu_core::Tz::Pacific__Kiritimati;
     let mut daily_dates = store
         .tasks
@@ -707,7 +707,7 @@ fn generate_blocks_daily_routines_before_launch_using_local_dates() {
         })
         .collect::<Vec<_>>();
     daily_dates.sort();
-    assert_eq!(daily_dates, ["2026-09-11", "2026-09-12"]);
+    assert_eq!(daily_dates, ["2026-09-09", "2026-09-10", "2026-09-11", "2026-09-12"]);
     let output = quick_ubu(
         &store_path,
         &[
