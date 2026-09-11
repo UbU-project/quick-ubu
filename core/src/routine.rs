@@ -220,7 +220,7 @@ pub fn generate_routine_tasks(
     days: u32,
     tz: Tz,
 ) -> GenerateReport {
-    generate_routine_tasks_with_daily_start(store, from, days, tz, NaiveDate::MIN)
+    generate_routine_tasks_with_daily_start(store, from, days, tz)
 }
 
 /// Generate within the requested window, excluding daily occurrences before
@@ -230,7 +230,6 @@ pub fn generate_routine_tasks_with_daily_start(
     from: NaiveDate,
     days: u32,
     tz: Tz,
-    daily_start: NaiveDate,
 ) -> GenerateReport {
     let templates: Vec<RoutineTemplate> = store.routines().values().cloned().collect();
     let mut report = GenerateReport {
@@ -239,11 +238,7 @@ pub fn generate_routine_tasks_with_daily_start(
     };
 
     let tasks = templates.iter().flat_map(|template| {
-        let excluded_days = if template.recurrence == Recurrence::Daily {
-            (daily_start - from).num_days().clamp(0, i64::from(days)) as u32
-        } else {
-            0
-        };
+        let excluded_days = 0;
         if excluded_days == days {
             return Vec::new();
         }

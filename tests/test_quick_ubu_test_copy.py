@@ -397,6 +397,31 @@ class ResetAndCopyTests(unittest.TestCase):
                 self.assertEqual(result, 0)
                 self.assertEqual(reset.call_args.args, (source, destination, expected, self.start))
 
+    def test_account_setup_error_identifies_role_and_token_file_before_reset(self):
+        for role in ["destination", "source"]:
+            with self.subTest(role=role):
+                failure = RuntimeError("invalid_grant: Token has been expired or revoked.")
+                effects = [failure] if role == "destination" else [Calendar(), failure]
+                stderr, stdout = io.StringIO(), io.StringIO()
+                with patch("tests.quick_ubu_test_copy.calendar_service", side_effect=effects), \
+                        patch("tests.quick_ubu_test_copy.reset_and_copy") as reset, \
+                        patch("sys.stderr", stderr), patch("sys.stdout", stdout):
+                    result = main([
+                        "--source-credentials", "main-credentials.json", "--source-token", "main-token.pickle",
+                        "--destination-credentials", "dummy-credentials.json", "--destination-token", "dummy-token.pickle",
+                        "--store", str(self.store), "--from", self.start.isoformat(),
+                    ])
+                prefix = "dummy" if role == "destination" else "main"
+                message = stderr.getvalue()
+                self.assertEqual(result, 1)
+                self.assertIn(f"{role} account setup failed", message)
+                self.assertIn(f'token file "{prefix}-token.pickle"', message)
+                self.assertIn(f'credentials file "{prefix}-credentials.json"', message)
+                self.assertIn("invalid_grant: Token has been expired or revoked.", message)
+                self.assertEqual(stdout.getvalue(), "")
+                reset.assert_not_called()
+                self.assertEqual(self.files, self.original_files)
+
     def test_cli_returns_error_for_missing_destination_marker(self):
         destination = Calendar()
         source = Calendar()

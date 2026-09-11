@@ -38,6 +38,17 @@ def calendar_service(credentials_path, token_path):
     return build("calendar", "v3", credentials=credentials, cache_discovery=False)
 
 
+def account_calendar_service(account, credentials_path, token_path):
+    """Identify authentication/setup failures without printing credential contents."""
+    try:
+        return calendar_service(credentials_path, token_path)
+    except Exception as error:
+        raise RuntimeError(
+            f'{account} account setup failed (token file "{token_path}", '
+            f'credentials file "{credentials_path}"): {error}'
+        ) from error
+
+
 def list_events(service, **query):
     page_token = None
     while True:
@@ -162,8 +173,12 @@ def main(argv=None):
             datetime.fromisoformat(args.start.replace("Z", "+00:00"))
             if args.start else now
         )
-        destination = calendar_service(args.destination_credentials, args.destination_token)
-        source = calendar_service(args.source_credentials, args.source_token)
+        destination = account_calendar_service(
+            "destination", args.destination_credentials, args.destination_token,
+        )
+        source = account_calendar_service(
+            "source", args.source_credentials, args.source_token,
+        )
         report = reset_and_copy(source, destination, args.store, start, now=now)
     except Exception as error:
         print(f"quick-ubu-test-copy: {error}", file=sys.stderr)

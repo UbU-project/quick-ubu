@@ -505,11 +505,8 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                     .map_err(|error| format!("invalid date {value}: {error}"))?,
                 None => Utc::now().with_timezone(&tz).date_naive(),
             };
-            // TODO: Remove this temporary daily-routine cutoff after the
-            // September 11, 2026 launch; restore generate_routine_tasks here.
-            let daily_start = NaiveDate::from_ymd_opt(2026, 9, 11).unwrap();
             let report =
-                generate_routine_tasks_with_daily_start(&mut store, from, args.days, tz, daily_start);
+                generate_routine_tasks_with_daily_start(&mut store, from, args.days, tz);
             backend.save(&store)?;
             println!("created {}, skipped {}", report.created, report.skipped);
         }
