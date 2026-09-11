@@ -839,6 +839,7 @@ mod tests {
             task_id: id(value),
             duration: ChronoDuration::minutes(duration_minutes),
             affect_cost,
+            must_finish_by: None,
             earliest_floor: fixed_time(),
             due: None,
             sched_predecessors,

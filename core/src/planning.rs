@@ -15,6 +15,7 @@ pub struct Placeable {
     pub duration: Duration,
     pub affect_cost: i32,
     pub earliest_floor: DateTime<Utc>,
+    pub must_finish_by: Option<DateTime<Utc>>,
     pub due: Option<DateTime<Utc>>,
     pub sched_predecessors: Vec<Id>,
     pub after_refs: Vec<(Id, Duration)>,
@@ -49,7 +50,7 @@ impl Planner for DeterministicPlacer {
         let mut entries = Vec::new();
         let mut conflicts = Vec::new();
 
-        for item in &input.items {
+        'items: for item in &input.items {
             let mut start_floor = item.earliest_floor;
             let mut predecessor_unplaced = false;
             for predecessor in &item.sched_predecessors {
@@ -105,6 +106,15 @@ impl Planner for DeterministicPlacer {
                 start = earliest_gap(start, item.duration, &occupied);
                 let day = start.date_naive();
                 let load = day_affect.get(&day).copied().unwrap_or(0);
+                // Bound every candidate before advancing the affect-budget scan.
+                // Equality fits: this is a completion ceiling, not a start cutoff.
+                if item.must_finish_by.is_some_and(|deadline| start + item.duration > deadline) {
+                    conflicts.push(Conflict {
+                        item: item.task_id,
+                        reason: "does not fit before deadline".to_string(),
+                    });
+                    continue 'items;
+                }
                 if load + item.affect_cost <= input.budget.cap {
                     break;
                 }
@@ -284,6 +294,7 @@ pub fn re_plan(
             duration: task.est_duration,
             affect_cost: task.affect_cost,
             earliest_floor,
+            must_finish_by: task.must_finish_by,
             due: task.due,
             sched_predecessors,
             after_refs,
