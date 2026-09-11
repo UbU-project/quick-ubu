@@ -143,7 +143,17 @@ pub fn expand_routine(
                 continue;
             };
             let start = localized_start.with_timezone(&Utc);
-            let end = start + template.duration;
+            let (pinned, earliest_start, must_finish_by) = if template.dynamic {
+                let latest = template.latest_tod
+                    .unwrap_or_else(|| NaiveTime::from_hms_opt(23, 59, 59).unwrap());
+                let localized = tz.from_local_datetime(&date.and_time(latest));
+                let Some(ceiling) = localized.clone().single().or_else(|| localized.earliest()) else {
+                    continue;
+                };
+                (None, Some(start), Some(ceiling.with_timezone(&Utc)))
+            } else {
+                (Some(TimeWindow { start, end: start + template.duration }), None, None)
+            };
             let id = Uuid::new_v5(&NAMESPACE, format!("{}|{}", template.id, date).as_bytes());
 
             tasks.push(Task {
@@ -156,9 +166,9 @@ pub fn expand_routine(
                 affect_cost: template.affect_cost,
                 est_duration: template.duration,
                 due: None,
-                earliest_start: None,
+                earliest_start,
                 category: template.category.clone(),
-                pinned: Some(TimeWindow { start, end }),
+                pinned,
                 transparent: template.transparent,
                 blocked_by: Vec::new(),
                 after: template
@@ -172,7 +182,7 @@ pub fn expand_routine(
                         offset: reference.offset,
                     })
                     .collect(),
-                must_finish_by: None,
+                must_finish_by,
                 defer_policy: DeferPolicy::RescheduleAsap,
                 status: TaskStatus::Scheduled,
                 provenance: Provenance::Manual,
@@ -184,10 +194,9 @@ pub fn expand_routine(
 
     tasks.sort_by_key(|task| {
         (
-            task.pinned
-                .as_ref()
-                .expect("routine tasks are pinned")
-                .start,
+            task.pinned.as_ref().map(|window| window.start)
+                .or(task.earliest_start)
+                .expect("routine tasks have a pin or an earliest start"),
             task.id,
         )
     });
