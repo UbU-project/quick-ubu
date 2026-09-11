@@ -144,15 +144,24 @@ pub fn expand_routine(
             };
             let start = localized_start.with_timezone(&Utc);
             let (pinned, earliest_start, must_finish_by) = if template.dynamic {
-                let latest = template.latest_tod
+                let latest = template
+                    .latest_tod
                     .unwrap_or_else(|| NaiveTime::from_hms_opt(23, 59, 59).unwrap());
                 let localized = tz.from_local_datetime(&date.and_time(latest));
-                let Some(ceiling) = localized.clone().single().or_else(|| localized.earliest()) else {
+                let Some(ceiling) = localized.clone().single().or_else(|| localized.earliest())
+                else {
                     continue;
                 };
                 (None, Some(start), Some(ceiling.with_timezone(&Utc)))
             } else {
-                (Some(TimeWindow { start, end: start + template.duration }), None, None)
+                (
+                    Some(TimeWindow {
+                        start,
+                        end: start + template.duration,
+                    }),
+                    None,
+                    None,
+                )
             };
             let id = Uuid::new_v5(&NAMESPACE, format!("{}|{}", template.id, date).as_bytes());
 
@@ -194,7 +203,9 @@ pub fn expand_routine(
 
     tasks.sort_by_key(|task| {
         (
-            task.pinned.as_ref().map(|window| window.start)
+            task.pinned
+                .as_ref()
+                .map(|window| window.start)
                 .or(task.earliest_start)
                 .expect("routine tasks have a pin or an earliest start"),
             task.id,
@@ -299,6 +310,188 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_routines_get_explicit_or_end_of_local_day_windows() {
+        let tz = chrono_tz::America::New_York;
+        for day in [date(2026, 3, 8), date(2026, 11, 1)] {
+            for latest in [Some(time(17, 0)), None] {
+                let mut routine = template(1, Recurrence::Daily);
+                routine.dynamic = true;
+                routine.latest_tod = latest;
+                let tasks = expand_routine(&[routine], day, 1, tz);
+                assert_eq!(tasks.len(), 1);
+                let task = &tasks[0];
+                assert!(task.pinned.is_none());
+                assert_eq!(
+                    task.earliest_start,
+                    Some(
+                        tz.from_local_datetime(&day.and_time(time(6, 30)))
+                            .unwrap()
+                            .with_timezone(&Utc)
+                    )
+                );
+                let ceiling = latest.unwrap_or(NaiveTime::from_hms_opt(23, 59, 59).unwrap());
+                assert_eq!(
+                    task.must_finish_by,
+                    Some(
+                        tz.from_local_datetime(&day.and_time(ceiling))
+                            .unwrap()
+                            .with_timezone(&Utc)
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_ceiling_uses_earliest_ambiguous_time_and_skips_nonexistent_time() {
+        let mut routine = template(1, Recurrence::Daily);
+        routine.dynamic = true;
+        routine.start_time = time(0, 30);
+        routine.latest_tod = Some(time(1, 30));
+        let tz = chrono_tz::America::New_York;
+        let day = date(2026, 11, 1);
+        let tasks = expand_routine(&[routine.clone()], day, 1, tz);
+        assert_eq!(
+            tasks[0].must_finish_by,
+            tz.from_local_datetime(&day.and_time(time(1, 30)))
+                .earliest()
+                .map(|at| at.with_timezone(&Utc))
+        );
+        routine.latest_tod = Some(time(2, 30));
+        assert!(expand_routine(&[routine], date(2026, 3, 8), 1, tz).is_empty());
+    }
+
+    #[test]
+    fn pinned_routines_ignore_latest_tod_and_mixed_generation_sorts_by_start() {
+        let mut pinned = template(1, Recurrence::Daily);
+        pinned.latest_tod = Some(time(1, 0));
+        let mut dynamic = template(2, Recurrence::Daily);
+        dynamic.dynamic = true;
+        dynamic.start_time = time(6, 0);
+        let tasks = expand_routine(&[pinned, dynamic], date(2026, 9, 11), 1, chrono_tz::UTC);
+        assert_eq!(tasks[0].title, "routine-2");
+        let fixed = &tasks[1];
+        assert_eq!(fixed.pinned.as_ref().unwrap().start.time(), time(6, 30));
+        assert!(fixed.earliest_start.is_none());
+        assert!(fixed.must_finish_by.is_none());
+    }
+
+    #[test]
+    fn catherine_dynamic_chain_fits_same_day_or_conflicts_when_offset_is_too_long() {
+        for offset in [Duration::hours(1), Duration::hours(3)] {
+            let mut first = template(1, Recurrence::Daily);
+            first.dynamic = true;
+            first.start_time = time(8, 0);
+            first.duration = Duration::minutes(30);
+            let mut second = template(2, Recurrence::Daily);
+            second.dynamic = true;
+            second.start_time = time(8, 0);
+            second.duration = Duration::minutes(30);
+            second.latest_tod = Some(time(10, 0));
+            second.after.push(RoutineAfter {
+                template_id: first.id,
+                offset,
+            });
+            let mut store = Store::new();
+            store.upsert_routine(first);
+            store.upsert_routine(second);
+            let day = date(2026, 9, 11);
+            assert_eq!(
+                generate_routine_tasks(&mut store, day, 2, chrono_tz::UTC).created,
+                4
+            );
+            assert_eq!(
+                generate_routine_tasks(&mut store, day, 2, chrono_tz::UTC).skipped,
+                4
+            );
+            let now = day.and_hms_opt(0, 0, 0).unwrap().and_utc();
+            let plan = crate::re_plan(
+                &store,
+                crate::ComputeTarget::DesktopOllama,
+                now,
+                now,
+                &[],
+                &crate::AffectBudget { cap: 100 },
+                &crate::DeterministicPlacer,
+            )
+            .unwrap();
+            for task in store
+                .tasks
+                .values()
+                .filter(|task| task.title == "routine-2")
+            {
+                let entry = plan.entries.iter().find(|entry| entry.item == task.id);
+                if offset == Duration::hours(1) {
+                    let entry = entry.unwrap();
+                    let reference = plan
+                        .entries
+                        .iter()
+                        .find(|entry| entry.item == task.after[0].task_id)
+                        .unwrap();
+                    assert_eq!(entry.window.start, reference.window.end + offset);
+                    assert!(entry.window.start >= task.earliest_start.unwrap());
+                    assert_eq!(entry.window.end, task.must_finish_by.unwrap());
+                } else {
+                    assert!(entry.is_none());
+                    assert!(plan.conflicts.contains(&crate::Conflict {
+                        item: task.id,
+                        reason: "does not fit before deadline".into()
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reversed_dynamic_window_conflicts_without_becoming_an_overnight_window() {
+        let mut routine = template(1, Recurrence::Daily);
+        routine.dynamic = true;
+        routine.latest_tod = Some(time(5, 0));
+        let mut store = Store::new();
+        store.upsert_routine(routine);
+        let day = date(2026, 9, 11);
+        generate_routine_tasks(&mut store, day, 1, chrono_tz::UTC);
+        let now = day.and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let plan = crate::re_plan(
+            &store,
+            crate::ComputeTarget::DesktopOllama,
+            now,
+            now,
+            &[],
+            &crate::AffectBudget { cap: 100 },
+            &crate::DeterministicPlacer,
+        )
+        .unwrap();
+        assert!(plan.entries.is_empty());
+        assert_eq!(plan.conflicts[0].reason, "does not fit before deadline");
+    }
+
+    #[test]
+    fn legacy_json_defaults_hard_ceiling_and_dynamic_routine_fields() {
+        let mut store = Store::new();
+        store.upsert_routine(template(1, Recurrence::Daily));
+        generate_routine_tasks(&mut store, date(2026, 9, 11), 1, chrono_tz::UTC);
+        let mut value = serde_json::to_value(&store).unwrap();
+        for task in value["tasks"].as_object_mut().unwrap().values_mut() {
+            task.as_object_mut().unwrap().remove("must_finish_by");
+        }
+        for template in value["routines"].as_object_mut().unwrap().values_mut() {
+            template.as_object_mut().unwrap().remove("dynamic");
+            template.as_object_mut().unwrap().remove("latest_tod");
+        }
+        let loaded: Store = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded, store);
+        assert!(loaded
+            .tasks
+            .values()
+            .all(|task| task.must_finish_by.is_none()));
+        assert!(loaded
+            .routines
+            .values()
+            .all(|routine| !routine.dynamic && routine.latest_tod.is_none()));
+    }
+
+    #[test]
     fn routine_after_resolves_same_day_ids_across_days_and_dst() {
         let first = template(1, Recurrence::Daily);
         let mut second = template(2, Recurrence::Daily);
@@ -337,16 +530,16 @@ mod tests {
             },
         );
         let mut second = template(2, Recurrence::Daily);
+        second.dynamic = true;
         second.after.push(RoutineAfter {
             template_id: first.id,
             offset: Duration::minutes(60),
         });
         let mut tasks = expand_routine(&[first, second], date(2026, 9, 1), 1, chrono_tz::UTC);
         assert_eq!(tasks.len(), 1);
-        let mut task = tasks.remove(0);
+        let task = tasks.remove(0);
         let task_id = task.id;
-        // Generation retains its pinned contract; after applies once the task is dynamic.
-        task.pinned = None;
+        assert!(task.pinned.is_none());
         let mut store = Store::new();
         store.upsert_task(task);
         let now = date(2026, 9, 1).and_hms_opt(0, 0, 0).unwrap().and_utc();

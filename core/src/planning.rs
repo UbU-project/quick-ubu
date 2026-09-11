@@ -108,7 +108,10 @@ impl Planner for DeterministicPlacer {
                 let load = day_affect.get(&day).copied().unwrap_or(0);
                 // Bound every candidate before advancing the affect-budget scan.
                 // Equality fits: this is a completion ceiling, not a start cutoff.
-                if item.must_finish_by.is_some_and(|deadline| start + item.duration > deadline) {
+                if item
+                    .must_finish_by
+                    .is_some_and(|deadline| start + item.duration > deadline)
+                {
                     conflicts.push(Conflict {
                         item: item.task_id,
                         reason: "does not fit before deadline".to_string(),
@@ -565,6 +568,117 @@ mod tests {
             item: id(1),
             reason: reason.into()
         }));
+    }
+
+    #[test]
+    fn hard_ceiling_allows_exact_completion_and_rejects_earlier_deadlines() {
+        for deadline in [at(3600), at(3599), at(0)] {
+            let mut store = Store::new();
+            let mut bounded = task(1, TaskStatus::Backlog, vec![]);
+            bounded.earliest_start = Some(at(1800));
+            bounded.must_finish_by = Some(deadline);
+            store.upsert_task(bounded);
+            let plan = after_plan(&store, &[], ComputeTarget::DesktopOllama).unwrap();
+            if deadline == at(3600) {
+                assert_eq!(
+                    window(&plan, 1),
+                    &TimeWindow {
+                        start: at(1800),
+                        end: at(3600)
+                    }
+                );
+                assert!(plan.conflicts.is_empty());
+            } else {
+                after_conflict(&plan, "does not fit before deadline");
+            }
+        }
+    }
+
+    #[test]
+    fn full_day_conflicts_for_day_bound_but_free_floating_moves_forward() {
+        let next_day = next_day_start(at(0).date_naive());
+        let fixed = [Handle {
+            id: id(99),
+            window: Some(TimeWindow {
+                start: at(0),
+                end: next_day,
+            }),
+            duration: next_day - at(0),
+            status: crate::HandleStatus::Scheduled,
+            deferrable: false,
+        }];
+        for bounded in [true, false] {
+            let mut store = Store::new();
+            let mut item = task(1, TaskStatus::Backlog, vec![]);
+            item.must_finish_by = bounded.then_some(next_day - Duration::seconds(1));
+            store.upsert_task(item);
+            let plan = after_plan(&store, &fixed, ComputeTarget::DesktopOllama).unwrap();
+            if bounded {
+                after_conflict(&plan, "does not fit before deadline");
+            } else {
+                assert_eq!(window(&plan, 1).start, next_day);
+                assert!(plan.conflicts.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn affect_budget_rollover_obeys_ceiling_without_charging_rejected_task() {
+        let next_day = next_day_start(at(0).date_naive());
+        for bounded in [true, false] {
+            let mut store = Store::new();
+            let mut first = task(1, TaskStatus::Backlog, vec![]);
+            first.affect_cost = 10;
+            store.upsert_task(first);
+            let mut second = task(2, TaskStatus::Backlog, vec![]);
+            second.affect_cost = 1;
+            second.must_finish_by = bounded.then_some(next_day - Duration::seconds(1));
+            store.upsert_task(second);
+            let plan = after_plan(&store, &[], ComputeTarget::DesktopOllama).unwrap();
+            if bounded {
+                assert_eq!(plan.entries.len(), 1);
+                assert_eq!(
+                    plan.conflicts,
+                    vec![Conflict {
+                        item: id(2),
+                        reason: "does not fit before deadline".into()
+                    }]
+                );
+            } else {
+                assert_eq!(window(&plan, 2).start, next_day);
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_deadline_does_not_occupy_time_and_blocks_after_successors() {
+        let mut store = after_store();
+        // Task 9 cannot fit; its successor 1 must also remain unplaced.
+        store.tasks.get_mut(&id(9)).unwrap().must_finish_by = Some(at(1799));
+        store.upsert_task(task(10, TaskStatus::Backlog, vec![]));
+        let plan = after_plan(&store, &[], ComputeTarget::DesktopOllama).unwrap();
+        after_conflict(&plan, "after-reference unplaced");
+        assert!(plan.conflicts.contains(&Conflict {
+            item: id(9),
+            reason: "does not fit before deadline".into()
+        }));
+        assert_eq!(window(&plan, 10).start, at(0));
+    }
+
+    #[test]
+    fn soft_due_still_places_while_hard_ceiling_excludes() {
+        let mut store = Store::new();
+        let mut item = task(1, TaskStatus::Backlog, vec![]);
+        item.due = Some(at(1));
+        store.upsert_task(item);
+        let plan = after_plan(&store, &[], ComputeTarget::DesktopOllama).unwrap();
+        assert_eq!(window(&plan, 1).start, at(0));
+        assert_eq!(plan.conflicts[0].reason, "placed after due date");
+        store.tasks.get_mut(&id(1)).unwrap().must_finish_by = Some(at(1));
+        after_conflict(
+            &after_plan(&store, &[], ComputeTarget::DesktopOllama).unwrap(),
+            "does not fit before deadline",
+        );
     }
 
     #[test]

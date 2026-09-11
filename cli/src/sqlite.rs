@@ -340,7 +340,7 @@ mod tests {
                 reminders: vec![10, 0],
                 blocked_by: vec![],
                 after: Vec::new(),
-                must_finish_by: None,
+                must_finish_by: Some(at + Duration::hours(2)),
                 defer_policy: DeferPolicy::ReturnToBacklog,
                 status: TaskStatus::Backlog,
                 provenance: Provenance::Manual,
@@ -359,6 +359,8 @@ mod tests {
         let routines: Vec<RoutineTemplate> =
             serde_json::from_str(include_str!("../../docs/example-routine.json")).unwrap();
         for mut routine in routines {
+            routine.dynamic = true;
+            routine.latest_tod = Some(chrono::NaiveTime::from_hms_opt(20, 0, 0).unwrap());
             routine.after.push(ubu_core::RoutineAfter {
                 template_id: id(999),
                 offset: Duration::minutes(30),

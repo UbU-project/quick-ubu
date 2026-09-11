@@ -820,3 +820,114 @@ fn after_commands_persist_list_replan_and_remove_with_atomic_rejection() {
     assert!(output.stdout.is_empty());
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn add_must_finish_by_persists_rfc3339_and_rejects_invalid_input_atomically() {
+    let (directory, path) = memory_store();
+    assert_success(&quick_ubu(
+        &path,
+        &[
+            "add",
+            "--title",
+            "Windowed",
+            "--duration",
+            "30",
+            "--earliest-start",
+            "2099-09-11T09:00:00-04:00",
+            "--must-finish-by",
+            "2099-09-11T09:30:00-04:00",
+        ],
+    ));
+    assert_success(&quick_ubu(
+        &path,
+        &["add", "--title", "Floating", "--duration", "30"],
+    ));
+    let before = fs::read_to_string(&path).unwrap();
+    let store: Store = serde_json::from_str(&before).unwrap();
+    let bounded = store
+        .tasks
+        .values()
+        .find(|task| task.title == "Windowed")
+        .unwrap();
+    assert_eq!(
+        bounded.must_finish_by,
+        Some("2099-09-11T13:30:00Z".parse().unwrap())
+    );
+    assert_eq!(
+        bounded.earliest_start,
+        Some("2099-09-11T13:00:00Z".parse().unwrap())
+    );
+    assert!(store
+        .tasks
+        .values()
+        .find(|task| task.title == "Floating")
+        .unwrap()
+        .must_finish_by
+        .is_none());
+    for invalid in ["not-a-date", "2099-09-11", "2099-09-11T09:30:00"] {
+        let output = quick_ubu(
+            &path,
+            &[
+                "add",
+                "--title",
+                "Invalid",
+                "--duration",
+                "30",
+                "--must-finish-by",
+                invalid,
+            ],
+        );
+        assert!(!output.status.success());
+        assert!(String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("invalid RFC3339 datetime"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn routine_import_and_generate_persist_dynamic_local_day_windows() {
+    let (directory, path) = memory_store();
+    let import_path = directory.join("dynamic-routines.json");
+    let mut routines: Vec<RoutineTemplate> =
+        serde_json::from_str(include_str!("../../docs/example-routine.json")).unwrap();
+    routines.truncate(1);
+    routines[0].dynamic = true;
+    routines[0].start_time = NaiveTime::from_hms_opt(8, 0, 0).unwrap();
+    routines[0].latest_tod = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
+    fs::write(&import_path, serde_json::to_string(&routines).unwrap()).unwrap();
+    assert_success(&quick_ubu(
+        &path,
+        &["routine-import", import_path.to_str().unwrap()],
+    ));
+    for expected in ["created 1, skipped 0\n", "created 0, skipped 1\n"] {
+        let output = quick_ubu(
+            &path,
+            &[
+                "generate",
+                "--from",
+                "2099-09-11",
+                "--days",
+                "1",
+                "--tz",
+                "UTC",
+            ],
+        );
+        assert_success(&output);
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    }
+    let store: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(store.routines[&routines[0].id], routines[0]);
+    let task = store.tasks.values().next().unwrap();
+    assert!(task.pinned.is_none());
+    assert_eq!(
+        task.earliest_start,
+        Some("2099-09-11T08:00:00Z".parse().unwrap())
+    );
+    assert_eq!(
+        task.must_finish_by,
+        Some("2099-09-11T10:00:00Z".parse().unwrap())
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
