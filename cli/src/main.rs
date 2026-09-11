@@ -131,6 +131,8 @@ enum Command {
     Generate(GenerateArgs),
     Export(ExportArgs),
     Import(ImportArgs),
+    /// Poll Calendar and import, replan, and export when events change.
+    Watch(WatchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -234,6 +236,14 @@ struct ExportArgs {
     token_cache: PathBuf,
     #[arg(long)]
     color_config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct WatchArgs {
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+    interval: u64,
+    #[command(flatten)]
+    calendar: ExportArgs,
 }
 
 #[derive(Debug, Args)]
@@ -537,6 +547,19 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
             ))?;
             backend.save(&store)?;
             println!("created {}, updated {}", report.created, report.updated);
+        }
+        Command::Watch(args) => {
+            let now = Utc::now();
+            let window = calendar_import_window(now, None, None)?;
+            let color_map = effective_color_map(&store, args.calendar.color_config.as_deref())?;
+            let config = watch::WatchConfig::new(window, color_map);
+            let transport = GoogleCalendarTransport::new(
+                args.calendar.credentials, args.calendar.token_cache, args.calendar.calendar_id,
+            );
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| format!("failed to start async runtime: {error}"))?;
+            runtime.block_on(watch::run(&mut store, backend, &transport, &config,
+                std::time::Duration::from_secs(args.interval)));
         }
         Command::Import(args) => {
             let now = Utc::now();
