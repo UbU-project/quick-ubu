@@ -244,6 +244,7 @@ mod tests {
             transparent: false,
             blocked_by: Vec::new(),
             after: Vec::new(),
+            must_finish_by: None,
             defer_policy,
             status: TaskStatus::Scheduled,
             provenance: Provenance::Manual,

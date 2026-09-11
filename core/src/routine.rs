@@ -62,6 +62,10 @@ pub struct RoutineTemplate {
     pub title: String,
     pub tier: Tier,
     pub start_time: NaiveTime,
+    #[serde(default)]
+    pub dynamic: bool,
+    #[serde(default)]
+    pub latest_tod: Option<NaiveTime>,
     pub duration: Duration,
     pub affect_cost: i32,
     /// Free-form classification (e.g. "personal", "relationship", "business").
@@ -168,6 +172,7 @@ pub fn expand_routine(
                         offset: reference.offset,
                     })
                     .collect(),
+                must_finish_by: None,
                 defer_policy: DeferPolicy::RescheduleAsap,
                 status: TaskStatus::Scheduled,
                 provenance: Provenance::Manual,
@@ -274,6 +279,8 @@ mod tests {
             transparent: false,
             reminders: Vec::new(),
             after: Vec::new(),
+            dynamic: false,
+            latest_tod: None,
             recurrence,
         }
     }

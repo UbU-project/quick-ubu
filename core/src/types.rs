@@ -107,6 +107,10 @@ pub struct Task {
     pub est_duration: chrono::Duration,
     pub due: Option<chrono::DateTime<chrono::Utc>>,
     pub earliest_start: Option<chrono::DateTime<chrono::Utc>>,
+    /// Hard placement ceiling: complete by this instant or conflict, never migrate.
+    /// Some = day-bound; None = free-floating. The floor is earliest_start.
+    #[serde(default)]
+    pub must_finish_by: Option<chrono::DateTime<chrono::Utc>>,
     /// Free-form classification (e.g. "personal", "relationship", "business").
     /// Maps to a calendar color on export and groups time in reporting.
     #[serde(default)]

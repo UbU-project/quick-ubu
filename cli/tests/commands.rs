@@ -540,6 +540,8 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             transparent: true,
             reminders: Vec::new(),
             after: Vec::new(),
+            dynamic: false,
+            latest_tod: None,
             recurrence: Recurrence::Daily,
         },
         RoutineTemplate {
@@ -553,6 +555,8 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             transparent: false,
             reminders: Vec::new(),
             after: Vec::new(),
+            dynamic: false,
+            latest_tod: None,
             recurrence: Recurrence::MonthlyDay {
                 days: [1, 15].into_iter().collect(),
             },
@@ -659,6 +663,8 @@ fn generate_blocks_daily_routines_before_launch_using_local_dates() {
             transparent: false,
             reminders: Vec::new(),
             after: Vec::new(),
+            dynamic: false,
+            latest_tod: None,
             recurrence,
         });
     }

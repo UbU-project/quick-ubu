@@ -502,6 +502,7 @@ mod tests {
             transparent: false,
             blocked_by,
             after: Vec::new(),
+            must_finish_by: None,
             defer_policy: DeferPolicy::ReturnToBacklog,
             status,
             provenance: Provenance::Manual,
