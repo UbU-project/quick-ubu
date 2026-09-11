@@ -146,6 +146,9 @@ struct AddArgs {
     due: Option<String>,
     #[arg(long)]
     earliest_start: Option<String>,
+    /// Hard completion ceiling for a dynamic task (RFC3339).
+    #[arg(long)]
+    must_finish_by: Option<String>,
     #[arg(long)]
     pin: Option<String>,
     #[arg(long)]
@@ -285,6 +288,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                     affect_cost: args.affect,
                     due: parse_optional_datetime(args.due)?,
                     earliest_start: parse_optional_datetime(args.earliest_start)?,
+                    must_finish_by: parse_optional_datetime(args.must_finish_by)?,
                     pin: parse_optional_datetime(args.pin)?,
                     category: args.category,
                     transparent: args.transparent,
