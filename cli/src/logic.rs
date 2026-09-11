@@ -784,9 +784,18 @@ pub fn shuffle_seeded<T>(items: &mut [T], seed: u64) {
     }
 }
 
+fn decision_is_reviewable(store: &Store, decision: &PendingDecision) -> bool {
+    let (a, b) = advisor_pair(&decision.proposal);
+    [a, b].into_iter().all(|id| {
+        store.tasks.get(&id).is_some_and(|task| task.status != TaskStatus::Done)
+    })
+}
+
 /// Randomize presentation without mutating the queue. Decisions involving an
 /// upcoming dynamic Task receive weight 1 + 63 / (1 + days_until_start)^2,
-/// using the earlier of their two Tasks. Every decision retains baseline weight.
+/// using the earlier of their two Tasks. Completed or missing endpoints are
+/// excluded; other decisions retain baseline weight. The queue is retained so
+/// undoing a completion makes its decisions reviewable again.
 /// Without a usable Plan, preserve the uniform shuffle.
 pub fn shuffled_pending_ids(
     store: &Store,
@@ -797,6 +806,7 @@ pub fn shuffled_pending_ids(
     let mut ids = store
         .pending_decisions
         .iter()
+        .filter(|decision| decision_is_reviewable(store, decision))
         .map(|decision| decision.id)
         .collect::<Vec<_>>();
     let mut weights = BTreeMap::<Id, f64>::new();
@@ -830,6 +840,7 @@ pub fn shuffled_pending_ids(
     let mut scored = store
         .pending_decisions
         .iter()
+        .filter(|decision| decision_is_reviewable(store, decision))
         .map(|decision| {
             let (a, b) = advisor_pair(&decision.proposal);
             let weight = weights
@@ -1208,6 +1219,33 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+
+    #[test]
+    fn completed_tasks_are_excluded_from_review_prioritize_advice_and_planning() {
+        let (a, b, c) = graph_ids();
+        let mut store = graph_store();
+        enqueue_incomparable_pairs(&mut store);
+        store.pending_decisions.push(dependency_decision(id(20), b, a));
+        store.pending_decisions.push(dependency_decision(id(21), a, c));
+        store.tasks.get_mut(&a).unwrap().status = TaskStatus::Done;
+        let before = store.clone();
+        assert_eq!(enqueue_incomparable_pairs(&mut store), 0);
+        let (_, advisor_ids) = build_advisor_prompt(&store);
+        assert_eq!(advisor_ids, vec![b, c]);
+        let plan = re_plan(&store, ComputeTarget::DesktopOllama, fixed_time(), fixed_time(), &[],
+            &AffectBudget { cap: 100 }, &DeterministicPlacer).unwrap();
+        assert!(!plan.entries.iter().any(|entry| entry.item == a));
+        let expected = store.pending_decisions.iter()
+            .find(|decision| preference_pair(&decision.proposal) == Some(ordered_pair(b, c))).unwrap().id;
+        for plan in [None, Some(&plan)] {
+            assert_eq!(shuffled_pending_ids(&store, 42, plan, fixed_time()), vec![expected]);
+        }
+        assert_eq!(store, before);
+        store.tasks.get_mut(&a).unwrap().status = TaskStatus::Backlog;
+        assert_eq!(shuffled_pending_ids(&store, 42, None, fixed_time()).len(), 5);
+        store.tasks.remove(&a);
+        assert_eq!(shuffled_pending_ids(&store, 42, None, fixed_time()), vec![expected]);
+    }
 
     #[test]
     fn after_add_replaces_offsets_and_remove_and_list_are_deterministic() {

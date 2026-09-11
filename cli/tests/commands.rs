@@ -931,3 +931,34 @@ fn routine_import_and_generate_persist_dynamic_local_day_windows() {
     );
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn review_and_prioritize_skip_queued_decisions_after_cli_completion() {
+    for command in ["review", "prioritize"] {
+        let (directory, path) = memory_store();
+        for title in ["Finished task", "Remaining A", "Remaining B"] {
+            assert_success(&quick_ubu(&path, &["add", "--title", title, "--duration", "30"]));
+        }
+        assert_success(&quick_ubu_with_input(&path, "prioritize", "q\n"));
+        let before: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(before.pending_decisions.len(), 3);
+        let finished = before.tasks.values().find(|task| task.title == "Finished task").unwrap().id;
+        assert_success(&quick_ubu(&path, &["done", &finished.to_string()]));
+        let output = quick_ubu_with_input(&path, command, "s\n");
+        assert_success(&output);
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(stdout.matches("Preference:").count(), 1);
+        assert!(stdout.contains("Remaining A"));
+        assert!(stdout.contains("Remaining B"));
+        assert!(!stdout.contains("Finished task"));
+        let after: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after.tasks[&finished].status, TaskStatus::Done);
+        assert_eq!(after.pending_decisions.len(), 2); // Retained for completion repairs.
+        assert_eq!(after.decision_history.len(), 1);
+        let output = quick_ubu_with_input(&path, command, "");
+        assert_success(&output);
+        assert!(!String::from_utf8(output.stdout).unwrap().contains("Preference:"));
+        assert_eq!(serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(), after);
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
