@@ -43,6 +43,7 @@ use ubu_core::{
 
 mod logic;
 mod persist;
+mod watch;
 use persist::{SqliteBackend, StorageBackend};
 
 #[derive(Debug, Parser)]
