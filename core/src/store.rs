@@ -32,6 +32,9 @@ pub struct Store {
     /// category -> Google Calendar event colorId overrides.
     #[serde(default)]
     pub category_colors: BTreeMap<String, String>,
+    /// Google event id -> change fingerprint, from the last poll cycle.
+    #[serde(default)]
+    pub poll_snapshot: BTreeMap<String, String>,
     /// append-only SessionLog
     pub log: Vec<LogEntry>,
 }

@@ -113,6 +113,7 @@ impl StorageBackend for SqliteBackend {
                 "preferences" => singleton!(preferences),
                 "decision_history" => singleton!(decision_history),
                 "ollama_model" => singleton!(ollama_model),
+                "poll_snapshot" => singleton!(poll_snapshot),
                 _ => {}
             }
         }
@@ -193,6 +194,7 @@ impl StorageBackend for SqliteBackend {
                     serde_json::to_string(&store.decision_history),
                 ),
                 ("ollama_model", serde_json::to_string(&store.ollama_model)),
+                ("poll_snapshot", serde_json::to_string(&store.poll_snapshot)),
             ]
             .into_iter()
             .map(|(key, data)| {
