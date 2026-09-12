@@ -2,6 +2,7 @@
 //! precompute functions. No I/O, no networking.
 
 pub mod decision;
+pub mod history;
 pub mod plan;
 pub mod planning;
 pub mod precompute;
@@ -14,6 +15,7 @@ pub mod store;
 pub mod types;
 
 pub use decision::*;
+pub use history::*;
 pub use plan::*;
 pub use planning::*;
 pub use precompute::*;
