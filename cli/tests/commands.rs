@@ -707,7 +707,10 @@ fn generate_daily_routines_uses_all_requested_local_dates_after_release() {
         })
         .collect::<Vec<_>>();
     daily_dates.sort();
-    assert_eq!(daily_dates, ["2026-09-09", "2026-09-10", "2026-09-11", "2026-09-12"]);
+    assert_eq!(
+        daily_dates,
+        ["2026-09-09", "2026-09-10", "2026-09-11", "2026-09-12"]
+    );
     let output = quick_ubu(
         &store_path,
         &[
@@ -937,12 +940,20 @@ fn review_and_prioritize_skip_queued_decisions_after_cli_completion() {
     for command in ["review", "prioritize"] {
         let (directory, path) = memory_store();
         for title in ["Finished task", "Remaining A", "Remaining B"] {
-            assert_success(&quick_ubu(&path, &["add", "--title", title, "--duration", "30"]));
+            assert_success(&quick_ubu(
+                &path,
+                &["add", "--title", title, "--duration", "30"],
+            ));
         }
         assert_success(&quick_ubu_with_input(&path, "prioritize", "q\n"));
         let before: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(before.pending_decisions.len(), 3);
-        let finished = before.tasks.values().find(|task| task.title == "Finished task").unwrap().id;
+        let finished = before
+            .tasks
+            .values()
+            .find(|task| task.title == "Finished task")
+            .unwrap()
+            .id;
         assert_success(&quick_ubu(&path, &["done", &finished.to_string()]));
         let output = quick_ubu_with_input(&path, command, "s\n");
         assert_success(&output);
@@ -957,8 +968,98 @@ fn review_and_prioritize_skip_queued_decisions_after_cli_completion() {
         assert_eq!(after.decision_history.len(), 1);
         let output = quick_ubu_with_input(&path, command, "");
         assert_success(&output);
-        assert!(!String::from_utf8(output.stdout).unwrap().contains("Preference:"));
-        assert_eq!(serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(), after);
+        assert!(!String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("Preference:"));
+        assert_eq!(
+            serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+            after
+        );
         fs::remove_dir_all(directory).unwrap();
     }
+}
+
+#[test]
+fn review_and_prioritize_present_tags_first_and_persist_confirmation_or_rejection() {
+    for (command, answer, expected) in [
+        ("review", "c\nq\n", ubu_core::Resolution::Confirmed),
+        ("prioritize", "r\nq\n", ubu_core::Resolution::Rejected),
+    ] {
+        let (directory, path) = memory_store();
+        for title in ["First", "Second"] {
+            assert_success(&quick_ubu(
+                &path,
+                &["add", "--title", title, "--duration", "30"],
+            ));
+        }
+        let mut store: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let ids = store.tasks.keys().copied().collect::<Vec<_>>();
+        store.pending_decisions = vec![
+            ubu_core::PendingDecision {
+                id: Uuid::from_u128(100),
+                source: ubu_core::DecisionSource::Elicitation,
+                proposal: ubu_core::Proposal::Preference {
+                    a: ids[0],
+                    b: ids[1],
+                    suggested: None,
+                },
+            },
+            ubu_core::PendingDecision {
+                id: Uuid::from_u128(101),
+                source: ubu_core::DecisionSource::Advisor,
+                proposal: ubu_core::Proposal::Tag {
+                    task_id: ids[0],
+                    tag: "focus".into(),
+                },
+            },
+        ];
+        test_support::seed(&path, &store);
+        let output = quick_ubu_with_input(&path, command, answer);
+        assert_success(&output);
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.find("Tag:").unwrap() < text.find("Preference:").unwrap());
+        assert!(text.contains("[c] confirm, [r] reject"));
+        let loaded: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.pending_decisions.len(), 1);
+        assert_eq!(loaded.decision_history[0].resolution, expected);
+        assert_eq!(
+            loaded.tasks[&ids[0]].tags,
+            if expected == ubu_core::Resolution::Confirmed {
+                vec!["focus"]
+            } else {
+                vec![]
+            }
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
+fn suggest_tags_parses_model_override_and_requires_model_before_http() {
+    use clap::Parser;
+    for (args, expected) in [
+        (vec!["quick-ubu", "suggest-tags"], None),
+        (
+            vec!["quick-ubu", "suggest-tags", "--model", "local-test"],
+            Some("local-test".to_owned()),
+        ),
+    ] {
+        let cli = crate::Cli::try_parse_from(args).unwrap();
+        let crate::Command::SuggestTags { model } = cli.command else {
+            panic!("expected suggest-tags");
+        };
+        assert_eq!(model, expected);
+    }
+    let (directory, path) = memory_store();
+    let output = quick_ubu(&path, &["suggest-tags"]);
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "quick-ubu: no ollama model set; run: quick-ubu set-model <name>\n"
+    );
+    assert_eq!(
+        serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+        Store::new()
+    );
+    fs::remove_dir_all(directory).unwrap();
 }

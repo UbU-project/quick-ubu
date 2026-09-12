@@ -332,7 +332,7 @@ mod tests {
                 detail: Some("Details".into()),
                 objective_ids: vec![id(1)],
                 skills: vec!["Rust".into()],
-                tags: Vec::new(),
+                tags: vec!["work".into(), "雪".into()],
                 affect_cost: 3,
                 est_duration: Duration::minutes(25),
                 due: Some(at),
@@ -423,6 +423,38 @@ mod tests {
             });
         }
         store
+    }
+
+    #[test]
+    fn legacy_json_tasks_without_tags_load_empty_and_tag_proposals_round_trip() {
+        let mut store = populated_store();
+        let mut value = serde_json::to_value(&store).unwrap();
+        for task in value["tasks"].as_object_mut().unwrap().values_mut() {
+            task.as_object_mut().unwrap().remove("tags");
+        }
+        let loaded: Store = serde_json::from_value(value).unwrap();
+        assert!(loaded.tasks.values().all(|task| task.tags.is_empty()));
+        store.pending_decisions.push(PendingDecision {
+            id: Uuid::from_u128(900),
+            source: DecisionSource::Advisor,
+            proposal: Proposal::Tag {
+                task_id: Uuid::from_u128(2),
+                tag: "focus".into(),
+            },
+        });
+        store.decision_history.push(DecisionRecord {
+            proposal: store.pending_decisions.last().unwrap().proposal.clone(),
+            resolution: Resolution::Rejected,
+            at: store.log[0].at,
+        });
+        let sqlite = SqliteBackend::in_memory().unwrap();
+        let json = crate::persist::JsonBackend {
+            path: Path::new("memory").join(format!("{}.json", Uuid::new_v4())),
+        };
+        for backend in [&sqlite as &dyn StorageBackend, &json as &dyn StorageBackend] {
+            backend.save(&store).unwrap();
+            assert_eq!(backend.load().unwrap(), store);
+        }
     }
 
     #[test]

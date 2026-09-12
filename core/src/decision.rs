@@ -18,7 +18,10 @@ pub enum PrefSuggestion {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Proposal {
-    Tag { task_id: Id, tag: String },
+    Tag {
+        task_id: Id,
+        tag: String,
+    },
     Dependency {
         blocked: Id,
         blocker: Id,
