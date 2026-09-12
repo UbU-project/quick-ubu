@@ -1414,6 +1414,119 @@ mod tests {
         }
     }
 
+    fn completed_prompt_examples() -> Vec<CompletedExample> {
+        vec![
+            CompletedExample {
+                title: "Archived research".into(),
+                tags: vec!["focus".into(), "research".into()],
+                category: Some("work".into()),
+                duration: Duration::minutes(45),
+                completed_at: fixed_time(),
+            },
+            CompletedExample {
+                title: "Archived walk".into(),
+                tags: vec!["outdoors".into()],
+                category: None,
+                duration: Duration::minutes(20),
+                completed_at: fixed_time() - Duration::days(1),
+            },
+        ]
+    }
+
+    #[test]
+    fn tag_history_precedes_tasks_and_empty_history_preserves_prompt() {
+        let mut store = graph_store();
+        let (a, _, _) = graph_ids();
+        store.tasks.get_mut(&a).unwrap().status = TaskStatus::Done;
+        let history = completed_prompt_examples();
+        let (empty, ids) = build_tag_prompt(&store, &[]);
+        let section = "Examples — completed tasks and the tags they were given:\n- Archived research  →  [focus,research]\n- Archived walk  →  [outdoors]\n";
+        let (prompt, with_ids) = build_tag_prompt(&store, &history);
+        assert_eq!(with_ids, ids);
+        assert!(!ids.contains(&a));
+        assert_eq!(ids.len(), 2);
+        assert!(!empty.contains("Examples —"));
+        assert!(empty.contains("[1] "));
+        assert!(empty.contains(r#"Return ONLY JSON: {"tags":[{"task":N,"tag":"..."}]}"#));
+        assert!(prompt.contains(section));
+        assert!(prompt.find(section).unwrap() < prompt.find("[1] ").unwrap());
+        assert_eq!(prompt.replacen(section, "", 1), empty);
+    }
+
+    #[test]
+    fn advisor_history_precedes_tasks_and_empty_history_preserves_prompt() {
+        let mut store = graph_store();
+        let (a, _, _) = graph_ids();
+        store.tasks.get_mut(&a).unwrap().status = TaskStatus::Done;
+        let history = completed_prompt_examples();
+        let (empty, ids) = build_advisor_prompt(&store, &[]);
+        let section = "Recently completed tasks (context):\n- Archived research  [work]  tags: [focus,research]\n- Archived walk  []  tags: [outdoors]\n";
+        let (prompt, with_ids) = build_advisor_prompt(&store, &history);
+        assert_eq!(with_ids, ids);
+        assert!(!ids.contains(&a));
+        assert_eq!(ids.len(), 2);
+        assert!(!empty.contains("Recently completed tasks (context):"));
+        assert!(empty.contains("[1] "));
+        assert!(empty.contains(r#"Return ONLY additions as JSON: {"dependencies":"#));
+        assert!(empty.contains(r#""preferences":[{"a":N,"b":M,"relation":"#));
+        assert!(prompt.contains(section));
+        assert!(prompt.find(section).unwrap() < prompt.find("[1] ").unwrap());
+        assert_eq!(prompt.replacen(section, "", 1), empty);
+    }
+
+    #[test]
+    fn classifiers_pass_bounded_history_to_stubs_without_indexing_completions() {
+        use ubu_core::{recent_completed_examples, ActualStatus, FactKind, LogEntry, LogEntryKind};
+
+        let mut store = graph_store();
+        let (a, b, _) = graph_ids();
+        for (task_id, days) in [(a, 0), (b, 1)] {
+            let task = store.tasks.get_mut(&task_id).unwrap();
+            task.status = TaskStatus::Done;
+            task.tags = vec!["history-tag".into()];
+            store.append_log(LogEntry {
+                id: task_id,
+                at: fixed_time() - Duration::days(days),
+                kind: LogEntryKind::Fact(FactKind::Actual {
+                    item_id: task_id,
+                    status: ActualStatus::Done,
+                    actual: None,
+                }),
+            });
+        }
+        for limit in [0, 1, 20] {
+            let history = recent_completed_examples(&store, limit);
+            assert_eq!(history.len(), limit.min(2));
+            let before = store.clone();
+            let tags = StubTransport::returning(Ok(r#"{"tags":[]}"#.into()));
+            suggest_tags(&mut store, &tags, Some("stub".into()), &history).unwrap();
+            assert_eq!(
+                *tags.prompts.borrow(),
+                vec![build_tag_prompt(&before, &history).0]
+            );
+            let advisor =
+                StubTransport::returning(Ok(r#"{"dependencies":[],"preferences":[]}"#.into()));
+            advise(&mut store, &advisor, Some("stub".into()), &history).unwrap();
+            assert_eq!(
+                *advisor.prompts.borrow(),
+                vec![build_advisor_prompt(&before, &history).0]
+            );
+            assert_eq!(store, before);
+
+            // Only Charlie is active: history must not make index 2 available.
+            let invalid_tags =
+                StubTransport::returning(Ok(r#"{"tags":[{"task":2,"tag":"x"}]}"#.into()));
+            assert!(
+                suggest_tags(&mut store, &invalid_tags, Some("stub".into()), &history).is_err()
+            );
+            let invalid_advisor = StubTransport::returning(Ok(
+                r#"{"dependencies":[{"blocked":1,"blocker":2}],"preferences":[]}"#.into(),
+            ));
+            assert!(advise(&mut store, &invalid_advisor, Some("stub".into()), &history).is_err());
+            assert_eq!(store, before);
+        }
+    }
+
     #[test]
     fn tag_confirm_and_reject_record_and_dequeue_without_duplicate_tags() {
         let (a, _, _) = graph_ids();
@@ -1611,7 +1724,7 @@ mod tests {
             serde_json::from_str::<Value>(data).unwrap(),
             json!({"title":"Alpha", "category":"work", "tags":["zebra", "alpha"]})
         );
-        assert!(prompt.contains("REUSE existing tags"));
+        assert!(prompt.contains("Prefer to reuse existing tags"));
         assert_eq!(build_tag_prompt(&store, &[]), (prompt, ids));
     }
 

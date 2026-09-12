@@ -1063,3 +1063,30 @@ fn suggest_tags_parses_model_override_and_requires_model_before_http() {
     );
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn classifiers_parse_default_custom_and_disabled_history_without_http() {
+    use clap::Parser;
+    for command in ["suggest-tags", "advise"] {
+        for (extra, expected) in [
+            (vec![], 20),
+            (vec!["--history", "0"], 0),
+            (vec!["--history", "7"], 7),
+        ] {
+            let mut args = vec!["quick-ubu", command];
+            args.extend(extra);
+            let cli = crate::Cli::try_parse_from(args).unwrap();
+            let history = match cli.command {
+                crate::Command::SuggestTags { history, .. }
+                | crate::Command::Advise { history, .. } => history,
+                _ => panic!("expected classifier"),
+            };
+            assert_eq!(history, expected);
+        }
+        for invalid in ["-1", "1.5", "abc", "18446744073709551616"] {
+            assert!(
+                crate::Cli::try_parse_from(["quick-ubu", command, "--history", invalid]).is_err()
+            );
+        }
+    }
+}
