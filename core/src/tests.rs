@@ -36,6 +36,7 @@ fn task(n: u128) -> Task {
         detail: None,
         objective_ids: Vec::new(),
         skills: Vec::new(),
+        tags: Vec::new(),
         affect_cost: 0,
         est_duration: chrono::Duration::minutes(30),
         due: None,

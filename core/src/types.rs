@@ -102,6 +102,8 @@ pub struct Task {
     pub detail: Option<String>,
     pub objective_ids: Vec<Id>,
     pub skills: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// signed: >0 draining, <0 restorative
     pub affect_cost: i32,
     pub est_duration: chrono::Duration,

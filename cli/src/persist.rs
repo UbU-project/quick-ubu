@@ -193,6 +193,7 @@ mod tests {
             detail: None,
             objective_ids,
             skills: Vec::new(),
+            tags: Vec::new(),
             affect_cost: 10,
             est_duration: Duration::minutes(30),
             due: None,

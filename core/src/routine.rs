@@ -172,6 +172,7 @@ pub fn expand_routine(
                 detail: None,
                 objective_ids: Vec::new(),
                 skills: Vec::new(),
+                tags: Vec::new(),
                 affect_cost: template.affect_cost,
                 est_duration: template.duration,
                 due: None,

@@ -332,6 +332,7 @@ mod tests {
                 detail: Some("Details".into()),
                 objective_ids: vec![id(1)],
                 skills: vec!["Rust".into()],
+                tags: Vec::new(),
                 affect_cost: 3,
                 est_duration: Duration::minutes(25),
                 due: Some(at),

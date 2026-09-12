@@ -97,6 +97,7 @@ mod tests {
             detail: Some(format!("TASK_DETAIL_{marker}_END")),
             objective_ids: Vec::new(),
             skills: vec![format!("skill-{marker}")],
+            tags: Vec::new(),
             affect_cost: 1,
             est_duration: Duration::minutes(30),
             due: None,

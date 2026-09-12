@@ -75,6 +75,7 @@ mod tests {
             detail: None,
             objective_ids: Vec::new(),
             skills: Vec::new(),
+            tags: Vec::new(),
             affect_cost: 0,
             est_duration: Duration::minutes(minutes),
             due: None,
