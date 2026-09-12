@@ -13,15 +13,15 @@ Two deadlines apply, both measured from request start:
   for that message. HTTP headers, blank lines, and incomplete message bytes do
   not satisfy or reset this deadline. A complete thinking message does count as
   a response, even when its answer fragment is empty.
-- `--ollama-total-timeout` (default **600 seconds**) limits the entire request,
+- `--ollama-total-timeout` (default **900 seconds**) limits the entire request,
   including startup. Stream progress does not reset this deadline. It also
   applies during startup if configured shorter than the first-response limit.
 
 For example:
 
 ```sh
-cargo run -- advise --ollama-timeout 300 --ollama-total-timeout 600
-cargo run -- replan --planner ollama --ollama-timeout 300 --ollama-total-timeout 600
+cargo run -- advise --ollama-timeout 300 --ollama-total-timeout 900
+cargo run -- replan --planner ollama --ollama-timeout 300 --ollama-total-timeout 900
 ```
 
 After the first message, a generation can run past 300 seconds, including long

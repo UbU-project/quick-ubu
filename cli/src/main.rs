@@ -124,7 +124,7 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         ollama_timeout: u64,
         /// Maximum seconds for the entire Ollama generation, including startup.
-        #[arg(long, default_value_t = 600)]
+        #[arg(long, default_value_t = 900)]
         ollama_total_timeout: u64,
     },
     ObjectiveAdd(ObjectiveAddArgs),
@@ -197,7 +197,7 @@ struct ReplanArgs {
     #[arg(long, default_value_t = 300)]
     ollama_timeout: u64,
     /// Maximum seconds for the entire Ollama generation, including startup.
-    #[arg(long, default_value_t = 600)]
+    #[arg(long, default_value_t = 900)]
     ollama_total_timeout: u64,
 }
 
@@ -435,7 +435,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                 base_url: "http://localhost:11434".into(),
                 model: resolved_model.clone(),
                 timeout_secs: 300,
-                total_timeout_secs: 600,
+                total_timeout_secs: 900,
             };
             let report = logic::suggest_tags(&mut store, &transport, Some(resolved_model))?;
             backend.save(&store)?;
@@ -1092,7 +1092,7 @@ mod tests {
                 assert_eq!(model, None);
                 assert_eq!(ollama_url, "http://localhost:11434");
                 assert_eq!(ollama_timeout, 300);
-                assert_eq!(ollama_total_timeout, 600);
+                assert_eq!(ollama_total_timeout, 900);
             }
             _ => panic!("expected advise"),
         }
@@ -1131,7 +1131,7 @@ mod tests {
                 Command::Replan(args) => {
                     assert_eq!(args.model.as_deref(), model_args.get(1).copied());
                     assert_eq!(args.ollama_timeout, 300);
-                    assert_eq!(args.ollama_total_timeout, 600);
+                    assert_eq!(args.ollama_total_timeout, 900);
                 }
                 _ => panic!("expected replan"),
             }
