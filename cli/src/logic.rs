@@ -811,7 +811,7 @@ fn decision_is_reviewable(store: &Store, decision: &PendingDecision) -> bool {
     })
 }
 
-/// Randomize presentation without mutating the queue. Decisions involving an
+/// Present shuffled tags first, then randomize relations without mutating the queue. Decisions involving an
 /// upcoming dynamic Task receive weight 1 + 63 / (1 + days_until_start)^2,
 /// using the earlier of their two Tasks. Completed or missing endpoints are
 /// excluded; other decisions retain baseline weight. The queue is retained so
@@ -823,10 +823,16 @@ pub fn shuffled_pending_ids(
     plan: Option<&Plan>,
     now: DateTime<Utc>,
 ) -> Vec<Id> {
+    let mut tag_ids = store.pending_decisions.iter()
+        .filter(|decision| decision_is_reviewable(store, decision))
+        .filter(|decision| matches!(decision.proposal, Proposal::Tag { .. }))
+        .map(|decision| decision.id).collect::<Vec<_>>();
+    shuffle_seeded(&mut tag_ids, seed);
     let mut ids = store
         .pending_decisions
         .iter()
         .filter(|decision| decision_is_reviewable(store, decision))
+        .filter(|decision| !matches!(decision.proposal, Proposal::Tag { .. }))
         .map(|decision| decision.id)
         .collect::<Vec<_>>();
     let mut weights = BTreeMap::<Id, f64>::new();
@@ -853,7 +859,8 @@ pub fn shuffled_pending_ids(
     }
     if weights.is_empty() {
         shuffle_seeded(&mut ids, seed);
-        return ids;
+        tag_ids.extend(ids);
+        return tag_ids;
     }
 
     let mut state = seed;
@@ -861,6 +868,7 @@ pub fn shuffled_pending_ids(
         .pending_decisions
         .iter()
         .filter(|decision| decision_is_reviewable(store, decision))
+        .filter(|decision| !matches!(decision.proposal, Proposal::Tag { .. }))
         .map(|decision| {
             let (a, b) = decision_endpoints(&decision.proposal);
             let weight = weights
@@ -875,7 +883,8 @@ pub fn shuffled_pending_ids(
         })
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| left.1.total_cmp(&right.1).then(left.0.cmp(&right.0)));
-    scored.into_iter().map(|(id, _)| id).collect()
+    tag_ids.extend(scored.into_iter().map(|(id, _)| id));
+    tag_ids
 }
 
 pub fn enqueue_incomparable_pairs(store: &mut Store) -> usize {
