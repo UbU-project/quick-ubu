@@ -157,6 +157,7 @@ pub fn build_advisor_prompt(store: &Store) -> (String, Vec<Id>) {
                 "earliest_start": task.earliest_start,
                 "category": task.category,
                 "skills": task.skills,
+                "tags": task.tags,
                 "affect_cost": task.affect_cost,
                 "transparent": task.transparent,
                 "commitment": task.commitment,
