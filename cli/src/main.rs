@@ -645,7 +645,7 @@ fn review_decisions(store: &mut ubu_core::Store) -> Result<(), String> {
                 ubu_core::Proposal::Preference { .. } => {
                     "[a] A ≻ B, [b] B ≻ A, [e] indifferent, [s] skip, [q] quit: "
                 }
-                ubu_core::Proposal::Dependency { .. } => "[c] confirm, [r] reject, [q] quit: ",
+                ubu_core::Proposal::Dependency { .. } | ubu_core::Proposal::Tag { .. } => "[c] confirm, [r] reject, [q] quit: ",
             };
             print!("{prompt}");
             io::stdout()
@@ -667,8 +667,8 @@ fn review_decisions(store: &mut ubu_core::Store) -> Result<(), String> {
                 (ubu_core::Proposal::Preference { .. }, "b") => Some(logic::Answer::BStrictA),
                 (ubu_core::Proposal::Preference { .. }, "e") => Some(logic::Answer::Indifferent),
                 (ubu_core::Proposal::Preference { .. }, "s") => Some(logic::Answer::Skip),
-                (ubu_core::Proposal::Dependency { .. }, "c") => Some(logic::Answer::Confirm),
-                (ubu_core::Proposal::Dependency { .. }, "r") => Some(logic::Answer::Reject),
+                (ubu_core::Proposal::Dependency { .. } | ubu_core::Proposal::Tag { .. }, "c") => Some(logic::Answer::Confirm),
+                (ubu_core::Proposal::Dependency { .. } | ubu_core::Proposal::Tag { .. }, "r") => Some(logic::Answer::Reject),
                 _ => None,
             };
             let Some(answer) = parsed else {
@@ -689,6 +689,9 @@ fn review_decisions(store: &mut ubu_core::Store) -> Result<(), String> {
 
 fn print_decision(store: &ubu_core::Store, decision: &ubu_core::PendingDecision) {
     match &decision.proposal {
+        ubu_core::Proposal::Tag { task_id, tag } => println!(
+            "Tag: {} → {:?}", decision_task_label(store, *task_id), tag
+        ),
         ubu_core::Proposal::Preference { a, b, suggested } => {
             println!(
                 "Preference: {} vs {}",

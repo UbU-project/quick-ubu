@@ -238,10 +238,27 @@ pub fn parse_proposals(text: &str, index_map: &[Id]) -> Result<Proposed, String>
     Ok(proposed)
 }
 
-fn advisor_pair(proposal: &Proposal) -> (Id, Id) {
+fn decision_endpoints(proposal: &Proposal) -> (Id, Id) {
     match proposal {
+        Proposal::Tag { task_id, .. } => (*task_id, *task_id),
         Proposal::Dependency { blocked, blocker } => ordered_pair(*blocked, *blocker),
         Proposal::Preference { a, b, .. } => ordered_pair(*a, *b),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum DecisionKey {
+    Pair(Id, Id),
+    Tag(Id, String),
+}
+
+fn decision_key(proposal: &Proposal) -> DecisionKey {
+    match proposal {
+        Proposal::Tag { task_id, tag } => DecisionKey::Tag(*task_id, tag.clone()),
+        _ => {
+            let (a, b) = decision_endpoints(proposal);
+            DecisionKey::Pair(a, b)
+        }
     }
 }
 
@@ -251,7 +268,7 @@ pub fn filter_and_enqueue(store: &mut Store, proposed: Proposed) -> AdviseReport
         known.extend(
             task.blocked_by
                 .iter()
-                .map(|blocker| ordered_pair(task.id, *blocker)),
+                .map(|blocker| { let (a, b) = ordered_pair(task.id, *blocker); DecisionKey::Pair(a, b) }),
         );
     }
     for preference in &store.preferences {
@@ -259,20 +276,21 @@ pub fn filter_and_enqueue(store: &mut Store, proposed: Proposed) -> AdviseReport
             singleton_task_for_bundle(store, preference.left),
             singleton_task_for_bundle(store, preference.right),
         ) {
-            known.insert(ordered_pair(a, b));
+            let (a, b) = ordered_pair(a, b);
+            known.insert(DecisionKey::Pair(a, b));
         }
     }
     known.extend(
         store
             .decision_history
             .iter()
-            .map(|record| advisor_pair(&record.proposal)),
+            .map(|record| decision_key(&record.proposal)),
     );
     known.extend(
         store
             .pending_decisions
             .iter()
-            .map(|decision| advisor_pair(&decision.proposal)),
+            .map(|decision| decision_key(&decision.proposal)),
     );
 
     let mut validation = store.clone();
@@ -293,12 +311,13 @@ pub fn filter_and_enqueue(store: &mut Store, proposed: Proposed) -> AdviseReport
                 }),
         );
     for proposal in proposals {
-        let pair = advisor_pair(&proposal);
+        let pair = decision_key(&proposal);
         if known.contains(&pair) {
             report.dropped_known += 1;
             continue;
         }
         let result = match &proposal {
+            Proposal::Tag { .. } => unreachable!("relation advisor only produces pairs"),
             Proposal::Dependency { blocked, blocker } => {
                 dep_add_ids(&mut validation, *blocked, *blocker)
             }
@@ -786,7 +805,7 @@ pub fn shuffle_seeded<T>(items: &mut [T], seed: u64) {
 }
 
 fn decision_is_reviewable(store: &Store, decision: &PendingDecision) -> bool {
-    let (a, b) = advisor_pair(&decision.proposal);
+    let (a, b) = decision_endpoints(&decision.proposal);
     [a, b].into_iter().all(|id| {
         store.tasks.get(&id).is_some_and(|task| task.status != TaskStatus::Done)
     })
@@ -843,7 +862,7 @@ pub fn shuffled_pending_ids(
         .iter()
         .filter(|decision| decision_is_reviewable(store, decision))
         .map(|decision| {
-            let (a, b) = advisor_pair(&decision.proposal);
+            let (a, b) = decision_endpoints(&decision.proposal);
             let weight = weights
                 .get(&a)
                 .copied()
@@ -924,6 +943,16 @@ pub fn resolve_decision(
     let proposal = store.pending_decisions[index].proposal.clone();
 
     let resolution = match (&proposal, answer) {
+        (Proposal::Tag { task_id, tag }, Answer::Confirm) => {
+            let task = store.tasks.get_mut(task_id)
+                .ok_or_else(|| format!("no task matches {task_id}"))?;
+            if !task.tags.contains(tag) { task.tags.push(tag.clone()); }
+            Resolution::Confirmed
+        }
+        (Proposal::Tag { .. }, Answer::Reject) => Resolution::Rejected,
+        (Proposal::Tag { .. }, _) => {
+            return Err("preference answer is invalid for a tag decision".into());
+        }
         (Proposal::Preference { a, b, .. }, Answer::AStrictB) => {
             pref_add_ids(store, *a, *b, false)?;
             Resolution::Confirmed
@@ -1026,7 +1055,7 @@ fn singleton_task_for_bundle(store: &Store, bundle_id: Id) -> Option<Id> {
 fn preference_pair(proposal: &Proposal) -> Option<(Id, Id)> {
     match proposal {
         Proposal::Preference { a, b, .. } => Some(ordered_pair(*a, *b)),
-        Proposal::Dependency { .. } => None,
+        Proposal::Dependency { .. } | Proposal::Tag { .. } => None,
     }
 }
 
