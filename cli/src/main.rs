@@ -114,10 +114,16 @@ enum Command {
     SuggestTags {
         #[arg(long)]
         model: Option<String>,
+        /// Number of recent tagged completions to include as context (0 disables).
+        #[arg(long, default_value_t = 20)]
+        history: usize,
     },
     Advise {
         #[arg(long)]
         model: Option<String>,
+        /// Number of recent tagged completions to include as context (0 disables).
+        #[arg(long, default_value_t = 20)]
+        history: usize,
         #[arg(long, default_value = "http://localhost:11434")]
         ollama_url: String,
         /// Seconds from request start to the first complete Ollama stream message.
@@ -429,7 +435,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                 println!("{category}  {color_id}");
             }
         }
-        Command::SuggestTags { model } => {
+        Command::SuggestTags { model, history } => {
             let resolved_model = logic::resolve_model(&store, model)?;
             let transport = OllamaHttpTransport {
                 base_url: "http://localhost:11434".into(),
@@ -437,13 +443,16 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                 timeout_secs: 300,
                 total_timeout_secs: 900,
             };
-            let report = logic::suggest_tags(&mut store, &transport, Some(resolved_model))?;
+            let history = ubu_core::recent_completed_examples(&store, history);
+            let report =
+                logic::suggest_tags(&mut store, &transport, Some(resolved_model), &history)?;
             backend.save(&store)?;
             println!("enqueued {}, dropped_known {}, dropped_cycle {}",
                 report.enqueued, report.dropped_known, report.dropped_cycle);
         }
         Command::Advise {
             model,
+            history,
             ollama_url,
             ollama_timeout,
             ollama_total_timeout,
@@ -455,7 +464,9 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                 timeout_secs: ollama_timeout,
                 total_timeout_secs: ollama_total_timeout,
             };
-            let report = logic::advise(&mut store, &transport, Some(resolved_model))?;
+            let history = ubu_core::recent_completed_examples(&store, history);
+            let report =
+                logic::advise(&mut store, &transport, Some(resolved_model), &history)?;
             backend.save(&store)?;
             println!(
                 "enqueued {}, dropped_known {}, dropped_cycle {}",
@@ -1088,6 +1099,7 @@ mod tests {
                 ollama_url,
                 ollama_timeout,
                 ollama_total_timeout,
+                ..
             } => {
                 assert_eq!(model, None);
                 assert_eq!(ollama_url, "http://localhost:11434");
@@ -1115,6 +1127,7 @@ mod tests {
                 ollama_url,
                 ollama_timeout,
                 ollama_total_timeout,
+                ..
             } => {
                 assert_eq!(model.as_deref(), Some("override"));
                 assert_eq!(ollama_url, "http://unused.invalid");

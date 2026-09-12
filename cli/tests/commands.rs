@@ -1045,7 +1045,7 @@ fn suggest_tags_parses_model_override_and_requires_model_before_http() {
         ),
     ] {
         let cli = crate::Cli::try_parse_from(args).unwrap();
-        let crate::Command::SuggestTags { model } = cli.command else {
+        let crate::Command::SuggestTags { model, .. } = cli.command else {
             panic!("expected suggest-tags");
         };
         assert_eq!(model, expected);

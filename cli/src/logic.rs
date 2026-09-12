@@ -374,10 +374,11 @@ pub fn advise(
     store: &mut Store,
     transport: &dyn LlmTransport,
     model_override: Option<String>,
+    history: &[CompletedExample],
 ) -> Result<AdviseReport, String> {
     // LlmTransport accepts only a prompt; the caller configures its model.
     resolve_model(store, model_override)?;
-    let (prompt, index_map) = build_advisor_prompt(store, &[]);
+    let (prompt, index_map) = build_advisor_prompt(store, history);
     let text = transport.generate(&prompt)?;
     let proposed = parse_proposals(&text, &index_map)?;
     Ok(filter_and_enqueue(store, proposed))
@@ -493,9 +494,10 @@ pub fn suggest_tags(
     store: &mut Store,
     transport: &dyn LlmTransport,
     model_override: Option<String>,
+    history: &[CompletedExample],
 ) -> Result<AdviseReport, String> {
     resolve_model(store, model_override)?;
-    let (prompt, index_map) = build_tag_prompt(store, &[]);
+    let (prompt, index_map) = build_tag_prompt(store, history);
     #[cfg(debug_assertions)]
     println!("suggest-tags prompt:\n{prompt}");
     let text = transport.generate(&prompt)?;
@@ -1658,7 +1660,7 @@ mod tests {
         let transport =
             StubTransport::returning(Ok(r#"{"tags":[{"task":1,"tag":"focus"}]}"#.into()));
         let before = store.clone();
-        let report = suggest_tags(&mut store, &transport, None).unwrap();
+        let report = suggest_tags(&mut store, &transport, None, &[]).unwrap();
         assert_eq!(report.enqueued, 1);
         assert_eq!(
             transport.prompts.borrow().as_slice(),
@@ -1680,7 +1682,7 @@ mod tests {
             assert_eq!(data["tags"], json!(task.tags));
         }
         assert_eq!(
-            suggest_tags(&mut store, &transport, None)
+            suggest_tags(&mut store, &transport, None, &[])
                 .unwrap()
                 .dropped_known,
             1
@@ -1693,7 +1695,7 @@ mod tests {
         let mut store = graph_store();
         let transport = StubTransport::returning(Ok("{}".into()));
         let before = store.clone();
-        assert!(suggest_tags(&mut store, &transport, None).is_err());
+        assert!(suggest_tags(&mut store, &transport, None, &[]).is_err());
         assert!(transport.prompts.borrow().is_empty());
         assert_eq!(store, before);
         for response in [
@@ -1701,7 +1703,7 @@ mod tests {
             Ok(r#"{"tags":[{"task":1,"tag":"valid"},{"task":999,"tag":"invalid"}]}"#.into()),
         ] {
             let transport = StubTransport::returning(response);
-            assert!(suggest_tags(&mut store, &transport, Some("override-model".into())).is_err());
+            assert!(suggest_tags(&mut store, &transport, Some("override-model".into()), &[]).is_err());
             assert_eq!(store, before);
         }
     }
@@ -2633,7 +2635,7 @@ mod tests {
         })
         .to_string()));
         assert_eq!(
-            advise(&mut store, &stub, None),
+            advise(&mut store, &stub, None, &[]),
             Ok(AdviseReport {
                 enqueued: 2,
                 ..AdviseReport::default()
@@ -2676,14 +2678,14 @@ mod tests {
         let before = store.clone();
         let stub = StubTransport::returning(Ok("invalid JSON".into()));
         assert_eq!(
-            advise(&mut store, &stub, None),
+            advise(&mut store, &stub, None, &[]),
             Err("no ollama model set; run: quick-ubu set-model <name>".into())
         );
         assert!(stub.prompts.borrow().is_empty());
         assert_eq!(store, before);
         for response in [Err("transport failed".into()), Ok("invalid JSON".into()), Ok(r#"{"dependencies":[{"blocked":1,"blocker":2}],"preferences":[{"a":2,"b":4,"relation":"indifferent"}]}"#.into())] {
             let stub = StubTransport::returning(response);
-            assert!(advise(&mut store, &stub, Some("override".into())).is_err());
+            assert!(advise(&mut store, &stub, Some("override".into()), &[]).is_err());
             assert_eq!(stub.prompts.borrow().len(), 1);
             assert_eq!(store, before);
         }
@@ -2694,7 +2696,7 @@ mod tests {
         let mut store = Store::new();
         let stub = StubTransport::returning(Ok(r#"{"dependencies":[],"preferences":[]}"#.into()));
         assert_eq!(
-            advise(&mut store, &stub, Some("override".into())),
+            advise(&mut store, &stub, Some("override".into()), &[]),
             Ok(AdviseReport::default())
         );
         assert_eq!(stub.prompts.borrow().len(), 1);
