@@ -111,6 +111,10 @@ enum Command {
     SetColor { category: String, color_id: String },
     /// List category colors with persisted overrides applied.
     ColorList,
+    SuggestTags {
+        #[arg(long)]
+        model: Option<String>,
+    },
     Advise {
         #[arg(long)]
         model: Option<String>,
@@ -424,6 +428,19 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
             for (category, color_id) in effective_color_map(&store, None)? {
                 println!("{category}  {color_id}");
             }
+        }
+        Command::SuggestTags { model } => {
+            let resolved_model = logic::resolve_model(&store, model)?;
+            let transport = OllamaHttpTransport {
+                base_url: "http://localhost:11434".into(),
+                model: resolved_model.clone(),
+                timeout_secs: 300,
+                total_timeout_secs: 600,
+            };
+            let report = logic::suggest_tags(&mut store, &transport, Some(resolved_model))?;
+            backend.save(&store)?;
+            println!("enqueued {}, dropped_known {}, dropped_cycle {}",
+                report.enqueued, report.dropped_known, report.dropped_cycle);
         }
         Command::Advise {
             model,
