@@ -166,3 +166,57 @@ pub fn filter_answers(questions: &[Question], answers: &Answers) -> BTreeMap<Str
         })
         .collect()
 }
+
+pub fn run_clarification<T: ollama_planner::LlmTransport, C: AnswerCollector>(
+    task: &ubu_core::Task,
+    transport: &T,
+    collector: &mut C,
+    history: &[ubu_core::CompletedExample],
+    max_rounds: usize,
+) -> (String, Vec<String>) {
+    use std::fmt::Write;
+
+    let mut accumulated = task.detail.clone().unwrap_or_default();
+    let mut tags = Vec::new();
+    let mut seen_tags = std::collections::BTreeSet::new();
+    for round in 0..max_rounds {
+        let prompt = build_clarify_prompt(task, &accumulated, history);
+        let response = match transport
+            .generate(&prompt)
+            .and_then(|text| parse_clarify_response(&text))
+        {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!(
+                    "clarification round {} failed; stopping: {error}",
+                    round + 1
+                );
+                break;
+            }
+        };
+        for tag in response.tags {
+            if seen_tags.insert(tag.clone()) {
+                tags.push(tag);
+            }
+        }
+        if response.done || response.questions.is_empty() {
+            break;
+        }
+        let answers = collector.collect(&response.questions);
+        if answers.stop {
+            break;
+        }
+        let answers = filter_answers(&response.questions, &answers);
+        // Preserve question order in the narrative, independent of ID ordering.
+        for question in &response.questions {
+            if let Some(answer) = answers.get(&question.id) {
+                if !accumulated.is_empty() && !accumulated.ends_with('\n') {
+                    accumulated.push('\n');
+                }
+                writeln!(accumulated, "Q: {}\nA: {}", question.text, answer)
+                    .expect("writing to a String cannot fail");
+            }
+        }
+    }
+    (accumulated, tags)
+}
