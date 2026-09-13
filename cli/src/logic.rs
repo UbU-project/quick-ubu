@@ -108,6 +108,34 @@ pub struct AdviseReport {
     pub dropped_cycle: usize,
 }
 
+#[derive(Debug, Default)]
+pub struct TaskFilter {
+    pub untagged: bool,
+    pub category: Option<String>,
+    pub tag: Option<String>,
+    pub limit: Option<usize>,
+}
+
+pub fn select_active_tasks(store: &Store, f: &TaskFilter) -> Vec<Id> {
+    let mut tasks: Vec<_> = store
+        .tasks
+        .values()
+        .filter(|task| {
+            matches!(task.status, TaskStatus::Backlog | TaskStatus::Scheduled)
+                && task.pinned.is_none()
+        })
+        .filter(|task| !f.untagged || task.tags.is_empty())
+        .filter(|task| f.category.as_ref().map_or(true, |cat| task.category.as_ref() == Some(cat)))
+        .filter(|task| f.tag.as_ref().map_or(true, |tag| task.tags.contains(tag)))
+        .collect();
+    // Option ordering puts uncategorized tasks first, then categories lexically.
+    tasks.sort_by_key(|task| (&task.category, task.id));
+    if let Some(limit) = f.limit {
+        tasks.truncate(limit);
+    }
+    tasks.into_iter().map(|task| task.id).collect()
+}
+
 pub fn build_advisor_prompt(store: &Store, history: &[CompletedExample]) -> (String, Vec<Id>) {
     let index_map: Vec<_> = store
         .tasks
