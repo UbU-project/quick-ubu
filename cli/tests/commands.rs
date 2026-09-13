@@ -1090,3 +1090,110 @@ fn classifiers_parse_default_custom_and_disabled_history_without_http() {
         }
     }
 }
+
+#[test]
+fn classifiers_parse_batching_and_selection_flags_without_http() {
+    use clap::Parser;
+    for command in ["suggest-tags", "advise"] {
+        for custom in [false, true] {
+            let mut args = vec!["quick-ubu", command];
+            if custom {
+                args.extend(["--batch-size", "3", "--category", "work", "--limit", "7"]);
+                if command == "suggest-tags" {
+                    args.push("--untagged");
+                } else {
+                    args.extend(["--tag", "focus"]);
+                }
+            }
+            let (size, category, limit) = match crate::Cli::try_parse_from(args).unwrap().command {
+                crate::Command::SuggestTags {
+                    batch_size,
+                    category,
+                    limit,
+                    untagged,
+                    ..
+                } => {
+                    assert_eq!(untagged, custom);
+                    (batch_size.get(), category, limit)
+                }
+                crate::Command::Advise {
+                    batch_size,
+                    category,
+                    limit,
+                    tag,
+                    ..
+                } => {
+                    assert_eq!(tag.as_deref(), custom.then_some("focus"));
+                    (batch_size.get(), category, limit)
+                }
+                _ => panic!("expected classifier"),
+            };
+            assert_eq!(size, if custom { 3 } else { 25 });
+            assert_eq!(category.as_deref(), custom.then_some("work"));
+            assert_eq!(limit, custom.then_some(7));
+        }
+        for invalid in ["0", "-1", "1.5", "abc", "18446744073709551616"] {
+            assert!(
+                crate::Cli::try_parse_from(["quick-ubu", command, "--batch-size", invalid])
+                    .is_err()
+            );
+        }
+        for invalid in ["-1", "1.5", "abc", "18446744073709551616"] {
+            assert!(
+                crate::Cli::try_parse_from(["quick-ubu", command, "--limit", invalid]).is_err()
+            );
+        }
+    }
+    assert!(crate::Cli::try_parse_from(["quick-ubu", "suggest-tags", "--tag", "focus"]).is_err());
+    assert!(crate::Cli::try_parse_from(["quick-ubu", "advise", "--untagged"]).is_err());
+}
+
+#[test]
+fn classifier_handlers_apply_empty_selection_filters_and_save_without_http() {
+    let (directory, path) = memory_store();
+    assert_success(&quick_ubu(&path, &["set-model", "unused-stub"]));
+    for command in ["suggest-tags", "advise"] {
+        let output = quick_ubu(&path, &[command]);
+        assert_success(&output);
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "batches run 0, failed 0, enqueued 0, dropped_known 0, dropped_cycle 0\n"
+        );
+    }
+    assert_success(&quick_ubu(
+        &path,
+        &[
+            "add",
+            "--title",
+            "Tagged task",
+            "--duration",
+            "30",
+            "--category",
+            "work",
+        ],
+    ));
+    let mut store: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    store.tasks.values_mut().next().unwrap().tags = vec!["focus".into()];
+    test_support::seed(&path, &store);
+    for args in [
+        vec!["suggest-tags", "--limit", "0"],
+        vec!["advise", "--limit", "0"],
+        vec!["suggest-tags", "--category", "absent"],
+        vec!["advise", "--category", "absent"],
+        vec!["suggest-tags", "--untagged"],
+        vec!["advise", "--tag", "absent"],
+    ] {
+        let output = quick_ubu(&path, &args);
+        assert_success(&output);
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "batches run 0, failed 0, enqueued 0, dropped_known 0, dropped_cycle 0\n"
+        );
+        assert_eq!(
+            serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+            store
+        );
+    }
+    fs::remove_dir_all(directory).unwrap();
+}

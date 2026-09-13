@@ -1476,6 +1476,446 @@ mod tests {
         }
     }
 
+    fn selection_store() -> Store {
+        let mut store = Store::new();
+        for n in 1..=10 {
+            let mut task = graph_task(id(n), &format!("Task {n}"));
+            task.category = Some("alpha".into());
+            task.tags = vec!["focus".into()];
+            store.upsert_task(task);
+        }
+        store.tasks.get_mut(&id(1)).unwrap().category = Some("zeta".into());
+        store.tasks.get_mut(&id(2)).unwrap().tags.clear();
+        let uncategorized = store.tasks.get_mut(&id(4)).unwrap();
+        uncategorized.category = None;
+        uncategorized.tags.clear();
+        uncategorized.status = TaskStatus::Scheduled;
+        store.tasks.get_mut(&id(5)).unwrap().tags = vec!["other".into()];
+        store.tasks.get_mut(&id(6)).unwrap().status = TaskStatus::Done;
+        store.tasks.get_mut(&id(7)).unwrap().status = TaskStatus::Active;
+        store.tasks.get_mut(&id(8)).unwrap().status = TaskStatus::Deferred;
+        for n in [9, 10] {
+            store.tasks.get_mut(&id(n)).unwrap().pinned = Some(TimeWindow {
+                start: fixed_time(),
+                end: fixed_time() + Duration::minutes(30),
+            });
+        }
+        store.tasks.get_mut(&id(10)).unwrap().status = TaskStatus::Scheduled;
+        store
+    }
+
+    #[test]
+    fn selection_filters_orders_limits_and_excludes_inactive_or_pinned_tasks() {
+        let store = selection_store();
+        let before = store.clone();
+        for (filter, expected) in [
+            (TaskFilter::default(), vec![4, 2, 3, 5, 1]),
+            (
+                TaskFilter {
+                    untagged: true,
+                    ..TaskFilter::default()
+                },
+                vec![4, 2],
+            ),
+            (
+                TaskFilter {
+                    category: Some("alpha".into()),
+                    ..TaskFilter::default()
+                },
+                vec![2, 3, 5],
+            ),
+            (
+                TaskFilter {
+                    tag: Some("focus".into()),
+                    ..TaskFilter::default()
+                },
+                vec![3, 1],
+            ),
+            (
+                TaskFilter {
+                    limit: Some(2),
+                    ..TaskFilter::default()
+                },
+                vec![4, 2],
+            ),
+            (
+                TaskFilter {
+                    limit: Some(0),
+                    ..TaskFilter::default()
+                },
+                vec![],
+            ),
+            (
+                TaskFilter {
+                    limit: Some(100),
+                    ..TaskFilter::default()
+                },
+                vec![4, 2, 3, 5, 1],
+            ),
+            (
+                TaskFilter {
+                    category: Some("Alpha".into()),
+                    ..TaskFilter::default()
+                },
+                vec![],
+            ),
+            (
+                TaskFilter {
+                    tag: Some("Focus".into()),
+                    ..TaskFilter::default()
+                },
+                vec![],
+            ),
+            (
+                TaskFilter {
+                    untagged: true,
+                    tag: Some("focus".into()),
+                    ..TaskFilter::default()
+                },
+                vec![],
+            ),
+            (
+                TaskFilter {
+                    category: Some("alpha".into()),
+                    tag: Some("focus".into()),
+                    limit: Some(1),
+                    untagged: false,
+                },
+                vec![3],
+            ),
+        ] {
+            assert_eq!(
+                select_active_tasks(&store, &filter),
+                expected.into_iter().map(id).collect::<Vec<_>>(),
+                "{filter:?}"
+            );
+        }
+        assert_eq!(store, before);
+    }
+
+    fn task_rows(prompt: &str) -> Vec<Value> {
+        prompt
+            .lines()
+            .filter_map(|line| {
+                let (index, data) = line.strip_prefix('[')?.split_once("] ")?;
+                index.parse::<usize>().ok()?;
+                Some(serde_json::from_str(data).unwrap())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn prompt_slices_preserve_requested_order_and_only_include_batch_relations() {
+        let mut store = graph_store();
+        let (a, b, c) = graph_ids();
+        dep_add_ids(&mut store, a, b).unwrap();
+        dep_add_ids(&mut store, c, a).unwrap();
+        pref_add_ids(&mut store, a, b, false).unwrap();
+        pref_add_ids(&mut store, c, a, false).unwrap();
+        let history = completed_prompt_examples();
+        for builder in [build_tag_prompt, build_advisor_prompt] {
+            let (prompt, index_map) = builder(&store, &[c, a], &history);
+            assert_eq!(index_map, vec![c, a]);
+            let rows = task_rows(&prompt);
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0]["title"], "Charlie");
+            assert_eq!(rows[1]["title"], "Alpha");
+            assert!(!prompt.contains("Bravo"));
+            let (empty, empty_map) = builder(&store, &[], &[]);
+            assert!(empty_map.is_empty());
+            assert!(task_rows(&empty).is_empty());
+        }
+        let prompt = build_advisor_prompt(&store, &[c, a], &history).0;
+        let structure: Value = serde_json::from_str(
+            prompt
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix(
+                        "Existing structure (extend it with more relations in the same spirit): ",
+                    )
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            structure,
+            json!({
+                "dependencies": [{"blocked": 1, "blocker": 2}],
+                "preferences": [{"a": 1, "b": 2, "relation": "a_strict_b"}],
+            })
+        );
+    }
+
+    struct BatchTransport {
+        responses: std::cell::RefCell<std::collections::VecDeque<Result<String, String>>>,
+        prompts: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl BatchTransport {
+        fn new(responses: Vec<Result<String, String>>) -> Self {
+            Self {
+                responses: std::cell::RefCell::new(responses.into()),
+                prompts: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl LlmTransport for BatchTransport {
+        fn generate(&self, prompt: &str) -> Result<String, String> {
+            self.prompts.borrow_mut().push(prompt.to_owned());
+            self.responses
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected generate call")
+        }
+    }
+
+    fn batch_store(count: u128) -> Store {
+        let mut store = Store::new();
+        set_model(&mut store, "stub".into());
+        for n in 1..=count {
+            store.upsert_task(graph_task(id(n), &format!("Task {n}")));
+        }
+        store
+    }
+
+    #[test]
+    fn tag_batches_cover_every_selected_task_and_carry_history_on_every_call() {
+        let mut store = batch_store(7);
+        let selected = select_active_tasks(&store, &TaskFilter::default());
+        let history = completed_prompt_examples();
+        let transport = BatchTransport::new([3, 3, 1].into_iter().map(|count| {
+            Ok(json!({"tags": (1..=count).map(|n| json!({"task":n,"tag":"focus"})).collect::<Vec<_>>()}).to_string())
+        }).collect());
+        let report = classify_batches(&mut store, &selected, 3, |store, chunk| {
+            suggest_tags(store, chunk, &transport, None, &history)
+        })
+        .unwrap();
+        assert_eq!(
+            report,
+            BatchReport {
+                batches_run: 3,
+                failed_batches: 0,
+                totals: AdviseReport {
+                    enqueued: 7,
+                    ..AdviseReport::default()
+                }
+            }
+        );
+        assert_eq!(transport.prompts.borrow().len(), 3);
+        for (prompt, chunk) in transport.prompts.borrow().iter().zip(selected.chunks(3)) {
+            assert_eq!(
+                task_rows(prompt)
+                    .iter()
+                    .map(|row| row["title"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                chunk
+                    .iter()
+                    .map(|id| store.tasks[id].title.as_str())
+                    .collect::<Vec<_>>()
+            );
+            assert!(prompt.contains("Archived research  →  [focus,research]"));
+        }
+        assert_eq!(
+            store
+                .pending_decisions
+                .iter()
+                .map(|decision| {
+                    let Proposal::Tag { task_id, .. } = decision.proposal else {
+                        panic!("expected tag");
+                    };
+                    task_id
+                })
+                .collect::<Vec<_>>(),
+            selected
+        );
+    }
+
+    #[test]
+    fn advisor_batches_enqueue_relations_using_each_batches_local_indices() {
+        let mut store = batch_store(6);
+        let selected = select_active_tasks(&store, &TaskFilter::default());
+        let transport = BatchTransport::new(vec![
+            Ok(
+                r#"{"dependencies":[{"blocked":2,"blocker":1}],"preferences":[]}"#.into()
+            );
+            3
+        ]);
+        let report = classify_batches(&mut store, &selected, 2, |store, chunk| {
+            advise(store, chunk, &transport, None, &[])
+        })
+        .unwrap();
+        assert_eq!(report.batches_run, 3);
+        assert_eq!(report.failed_batches, 0);
+        assert_eq!(report.totals.enqueued, 3);
+        assert_eq!(transport.prompts.borrow().len(), 3);
+        for (i, decision) in store.pending_decisions.iter().enumerate() {
+            assert_eq!(
+                decision.proposal,
+                Proposal::Dependency {
+                    blocked: id(i as u128 * 2 + 2),
+                    blocker: id(i as u128 * 2 + 1)
+                }
+            );
+        }
+        assert!(transport
+            .prompts
+            .borrow()
+            .iter()
+            .all(|prompt| task_rows(prompt).len() == 2));
+    }
+
+    #[test]
+    fn batch_queue_deduplicates_repeated_tag_and_relation_proposals() {
+        // Production selection is unique and chunks do not overlap. Repeated IDs
+        // here deliberately exercise queue dedup across separate classifier calls.
+        let mut store = batch_store(2);
+        let transport =
+            BatchTransport::new(vec![Ok(r#"{"tags":[{"task":1,"tag":"focus"}]}"#.into()); 2]);
+        let report = classify_batches(&mut store, &[id(1), id(1)], 1, |store, chunk| {
+            suggest_tags(store, chunk, &transport, None, &[])
+        })
+        .unwrap();
+        assert_eq!(
+            report.totals,
+            AdviseReport {
+                enqueued: 1,
+                dropped_known: 1,
+                dropped_cycle: 0
+            }
+        );
+        assert_eq!(transport.prompts.borrow().len(), 2);
+        assert_eq!(store.pending_decisions.len(), 1);
+
+        let transport = BatchTransport::new(vec![
+            Ok(
+                r#"{"dependencies":[{"blocked":2,"blocker":1}],"preferences":[]}"#.into()
+            );
+            2
+        ]);
+        let report = classify_batches(
+            &mut store,
+            &[id(1), id(2), id(1), id(2)],
+            2,
+            |store, chunk| advise(store, chunk, &transport, None, &[]),
+        )
+        .unwrap();
+        assert_eq!(
+            report.totals,
+            AdviseReport {
+                enqueued: 1,
+                dropped_known: 1,
+                dropped_cycle: 0
+            }
+        );
+        assert_eq!(transport.prompts.borrow().len(), 2);
+        assert_eq!(store.pending_decisions.len(), 2);
+    }
+
+    #[test]
+    fn failed_tag_batches_skip_transport_and_parse_errors_and_keep_successes() {
+        let mut store = batch_store(5);
+        let selected = select_active_tasks(&store, &TaskFilter::default());
+        let transport = BatchTransport::new(vec![
+            Ok(r#"{"tags":[{"task":1,"tag":"first"}]}"#.into()),
+            Err("offline stub error".into()),
+            Ok(r#"{"tags":[{"task":1,"tag":"partial"},{"task":2,"tag":"invalid"}]}"#.into()),
+            Ok("invalid JSON".into()),
+            Ok(r#"{"tags":[{"task":1,"tag":"last"}]}"#.into()),
+        ]);
+        let report = classify_batches(&mut store, &selected, 1, |store, chunk| {
+            suggest_tags(store, chunk, &transport, None, &[])
+        })
+        .unwrap();
+        assert_eq!(report.batches_run, 5);
+        assert_eq!(report.failed_batches, 3);
+        assert_eq!(report.totals.enqueued, 2);
+        assert_eq!(transport.prompts.borrow().len(), 5);
+        assert_eq!(
+            store
+                .pending_decisions
+                .iter()
+                .map(|d| decision_endpoints(&d.proposal).0)
+                .collect::<Vec<_>>(),
+            vec![id(1), id(5)]
+        );
+    }
+
+    #[test]
+    fn failed_advisor_batches_skip_errors_and_aggregate_created_and_dropped_totals() {
+        let mut store = batch_store(8);
+        dep_add_ids(&mut store, id(2), id(1)).unwrap();
+        let selected = select_active_tasks(&store, &TaskFilter::default());
+        let transport = BatchTransport::new(vec![
+            Ok(r#"{"dependencies":[{"blocked":2,"blocker":1},{"blocked":1,"blocker":1}],"preferences":[]}"#.into()),
+            Err("offline stub error".into()),
+            Ok(r#"{"dependencies":[{"blocked":2,"blocker":1}],"preferences":[{"a":1,"b":3,"relation":"indifferent"}]}"#.into()),
+            Ok(r#"{"dependencies":[{"blocked":2,"blocker":1}],"preferences":[]}"#.into()),
+        ]);
+        let report = classify_batches(&mut store, &selected, 2, |store, chunk| {
+            advise(store, chunk, &transport, None, &[])
+        })
+        .unwrap();
+        assert_eq!(
+            report,
+            BatchReport {
+                batches_run: 4,
+                failed_batches: 2,
+                totals: AdviseReport {
+                    enqueued: 1,
+                    dropped_known: 1,
+                    dropped_cycle: 1
+                }
+            }
+        );
+        assert_eq!(transport.prompts.borrow().len(), 4);
+        assert_eq!(store.pending_decisions.len(), 1);
+        assert_eq!(
+            store.pending_decisions[0].proposal,
+            Proposal::Dependency {
+                blocked: id(8),
+                blocker: id(7)
+            }
+        );
+    }
+
+    #[test]
+    fn untagged_selection_is_batched_and_empty_selection_never_generates() {
+        let mut store = selection_store();
+        set_model(&mut store, "stub".into());
+        let selected = select_active_tasks(
+            &store,
+            &TaskFilter {
+                untagged: true,
+                ..TaskFilter::default()
+            },
+        );
+        assert_eq!(selected, vec![id(4), id(2)]);
+        let transport =
+            BatchTransport::new(vec![Ok(r#"{"tags":[{"task":1,"tag":"new"}]}"#.into()); 2]);
+        let report = classify_batches(&mut store, &selected, 1, |store, chunk| {
+            suggest_tags(store, chunk, &transport, None, &[])
+        })
+        .unwrap();
+        assert_eq!(report.totals.enqueued, 2);
+        assert_eq!(transport.prompts.borrow().len(), 2);
+        let empty = BatchTransport::new(vec![]);
+        for classifier in [suggest_tags, advise] {
+            assert_eq!(
+                classify_batches(&mut store, &[], 25, |store, chunk| {
+                    classifier(store, chunk, &empty, None, &[])
+                })
+                .unwrap(),
+                BatchReport::default()
+            );
+        }
+        assert!(classify_batches(&mut store, &selected, 0, |_, _| panic!(
+            "zero batch must be rejected"
+        ))
+        .is_err());
+        assert!(empty.prompts.borrow().is_empty());
+    }
+
     fn active_ids(store: &Store) -> Vec<Id> {
         store.tasks.values()
             .filter(|task| matches!(task.status, TaskStatus::Backlog | TaskStatus::Scheduled)
