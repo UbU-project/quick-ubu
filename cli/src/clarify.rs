@@ -140,3 +140,29 @@ pub fn parse_clarify_response(text: &str) -> Result<ClarifyResponse, String> {
         done,
     })
 }
+
+pub fn relevant<'a>(questions: &'a [Question], answers: &Answers) -> Vec<&'a Question> {
+    questions
+        .iter()
+        .filter(|question| {
+            question.depends_on.as_ref().map_or(true, |(qid, want)| {
+                answers
+                    .answers
+                    .get(qid)
+                    .is_some_and(|answer| answer.eq_ignore_ascii_case(want))
+            })
+        })
+        .collect()
+}
+
+pub fn filter_answers(questions: &[Question], answers: &Answers) -> BTreeMap<String, String> {
+    relevant(questions, answers)
+        .into_iter()
+        .filter_map(|question| {
+            answers
+                .answers
+                .get(&question.id)
+                .map(|answer| (question.id.clone(), answer.clone()))
+        })
+        .collect()
+}
