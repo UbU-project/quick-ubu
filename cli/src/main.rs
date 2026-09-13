@@ -117,6 +117,18 @@ enum Command {
         /// Number of recent tagged completions to include as context (0 disables).
         #[arg(long, default_value_t = 20)]
         history: usize,
+        /// Maximum active tasks per classifier call.
+        #[arg(long, default_value = "25")]
+        batch_size: std::num::NonZeroUsize,
+        /// Select tasks with this exact category.
+        #[arg(long)]
+        category: Option<String>,
+        /// Maximum tasks to select, after filtering and category ordering.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Select only tasks without tags.
+        #[arg(long)]
+        untagged: bool,
     },
     Advise {
         #[arg(long)]
@@ -124,6 +136,18 @@ enum Command {
         /// Number of recent tagged completions to include as context (0 disables).
         #[arg(long, default_value_t = 20)]
         history: usize,
+        /// Maximum active tasks per classifier call.
+        #[arg(long, default_value = "25")]
+        batch_size: std::num::NonZeroUsize,
+        /// Select tasks with this exact category.
+        #[arg(long)]
+        category: Option<String>,
+        /// Maximum tasks to select, after filtering and category ordering.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Select tasks carrying this exact tag; advice relates tasks within each batch only.
+        #[arg(long)]
+        tag: Option<String>,
         #[arg(long, default_value = "http://localhost:11434")]
         ollama_url: String,
         /// Seconds from request start to the first complete Ollama stream message.
@@ -295,6 +319,17 @@ fn run(cli: Cli) -> Result<(), String> {
     run_with_backend(cli, &backend)
 }
 
+fn print_classifier_report(report: &logic::BatchReport) {
+    println!(
+        "batches run {}, failed {}, enqueued {}, dropped_known {}, dropped_cycle {}",
+        report.batches_run,
+        report.failed_batches,
+        report.totals.enqueued,
+        report.totals.dropped_known,
+        report.totals.dropped_cycle
+    );
+}
+
 fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String> {
     let mut store = backend.load()?;
 
@@ -435,7 +470,14 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                 println!("{category}  {color_id}");
             }
         }
-        Command::SuggestTags { model, history } => {
+        Command::SuggestTags {
+            model,
+            history,
+            batch_size,
+            category,
+            limit,
+            untagged,
+        } => {
             let resolved_model = logic::resolve_model(&store, model)?;
             let transport = OllamaHttpTransport {
                 base_url: "http://localhost:11434".into(),
@@ -444,16 +486,37 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                 total_timeout_secs: 900,
             };
             let history = ubu_core::recent_completed_examples(&store, history);
-            let selected = logic::select_active_tasks(&store, &logic::TaskFilter::default());
-            let report =
-                logic::suggest_tags(&mut store, &selected, &transport, Some(resolved_model), &history)?;
+            let filter = logic::TaskFilter {
+                untagged,
+                category,
+                limit,
+                tag: None,
+            };
+            let selected = logic::select_active_tasks(&store, &filter);
+            let report = logic::classify_batches(
+                &mut store,
+                &selected,
+                batch_size.get(),
+                |store, chunk| {
+                    logic::suggest_tags(
+                        store,
+                        chunk,
+                        &transport,
+                        Some(resolved_model.clone()),
+                        &history,
+                    )
+                },
+            )?;
             backend.save(&store)?;
-            println!("enqueued {}, dropped_known {}, dropped_cycle {}",
-                report.enqueued, report.dropped_known, report.dropped_cycle);
+            print_classifier_report(&report);
         }
         Command::Advise {
             model,
             history,
+            batch_size,
+            category,
+            limit,
+            tag,
             ollama_url,
             ollama_timeout,
             ollama_total_timeout,
@@ -466,14 +529,29 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                 total_timeout_secs: ollama_total_timeout,
             };
             let history = ubu_core::recent_completed_examples(&store, history);
-            let selected = logic::select_active_tasks(&store, &logic::TaskFilter::default());
-            let report =
-                logic::advise(&mut store, &selected, &transport, Some(resolved_model), &history)?;
+            let filter = logic::TaskFilter {
+                category,
+                tag,
+                limit,
+                untagged: false,
+            };
+            let selected = logic::select_active_tasks(&store, &filter);
+            let report = logic::classify_batches(
+                &mut store,
+                &selected,
+                batch_size.get(),
+                |store, chunk| {
+                    logic::advise(
+                        store,
+                        chunk,
+                        &transport,
+                        Some(resolved_model.clone()),
+                        &history,
+                    )
+                },
+            )?;
             backend.save(&store)?;
-            println!(
-                "enqueued {}, dropped_known {}, dropped_cycle {}",
-                report.enqueued, report.dropped_known, report.dropped_cycle
-            );
+            print_classifier_report(&report);
         }
         Command::Replan(args) => {
             let now = Utc::now();

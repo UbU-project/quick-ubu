@@ -108,6 +108,42 @@ pub struct AdviseReport {
     pub dropped_cycle: usize,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BatchReport {
+    pub batches_run: usize,
+    pub failed_batches: usize,
+    pub totals: AdviseReport,
+}
+
+/// Run sequential, disjoint batches; successful batches update the shared queue.
+/// The classifier must parse its entire response before mutating the store.
+pub fn classify_batches(
+    store: &mut Store,
+    selected: &[Id],
+    batch_size: usize,
+    mut classify: impl FnMut(&mut Store, &[Id]) -> Result<AdviseReport, String>,
+) -> Result<BatchReport, String> {
+    if batch_size == 0 {
+        return Err("batch size must be greater than zero".into());
+    }
+    let mut report = BatchReport::default();
+    for chunk in selected.chunks(batch_size) {
+        report.batches_run += 1;
+        match classify(store, chunk) {
+            Ok(batch) => {
+                report.totals.enqueued += batch.enqueued;
+                report.totals.dropped_known += batch.dropped_known;
+                report.totals.dropped_cycle += batch.dropped_cycle;
+            }
+            Err(error) => {
+                report.failed_batches += 1;
+                eprintln!("batch {} failed; skipped: {error}", report.batches_run);
+            }
+        }
+    }
+    Ok(report)
+}
+
 #[derive(Debug, Default)]
 pub struct TaskFilter {
     pub untagged: bool,
@@ -125,7 +161,11 @@ pub fn select_active_tasks(store: &Store, f: &TaskFilter) -> Vec<Id> {
                 && task.pinned.is_none()
         })
         .filter(|task| !f.untagged || task.tags.is_empty())
-        .filter(|task| f.category.as_ref().map_or(true, |cat| task.category.as_ref() == Some(cat)))
+        .filter(|task| {
+            f.category
+                .as_ref()
+                .map_or(true, |cat| task.category.as_ref() == Some(cat))
+        })
         .filter(|task| f.tag.as_ref().map_or(true, |tag| task.tags.contains(tag)))
         .collect();
     // Option ordering puts uncategorized tasks first, then categories lexically.
