@@ -127,6 +127,13 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         history: usize,
     },
+    /// Answer pending clarification questions without calling the model.
+    ClarifyAnswer {
+        prefix: Option<String>,
+        /// Use the same round cap as batch; finalize after answering this round.
+        #[arg(long, default_value_t = 5)]
+        round_cap: u32,
+    },
     /// Run classifiers unattended, saving progress after every chunk.
     Batch {
         #[arg(long, value_enum)]
@@ -581,6 +588,15 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 "clarified {task_id}; enqueued {}, dropped_known {}, dropped_cycle {}",
                 report.enqueued, report.dropped_known, report.dropped_cycle
             );
+        }
+        Command::ClarifyAnswer { prefix, round_cap } => {
+            let task_id = prefix.as_deref().map(|prefix| persist::resolve_task_id(&store, prefix)).transpose()?;
+            let report = clarify::answer_sessions(
+                &mut store, task_id, &mut clarify::EditorCollector, round_cap,
+                &mut |store| backend.save(store),
+            )?;
+            println!("clarify-answer: answered {}, finalized {}, proposals queued {}, stopped {}",
+                report.answered, report.finalized, report.queued, report.stopped);
         }
         Command::Batch {
             only,

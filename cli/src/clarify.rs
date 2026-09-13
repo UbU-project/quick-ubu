@@ -198,8 +198,6 @@ pub fn run_clarification<T: ollama_planner::LlmTransport, C: AnswerCollector>(
     history: &[ubu_core::CompletedExample],
     max_rounds: usize,
 ) -> (String, Vec<String>) {
-    use std::fmt::Write;
-
     let mut accumulated = task.detail.clone().unwrap_or_default();
     let mut tags = Vec::new();
     let mut seen_tags = std::collections::BTreeSet::new();
@@ -230,19 +228,25 @@ pub fn run_clarification<T: ollama_planner::LlmTransport, C: AnswerCollector>(
         if answers.stop {
             break;
         }
-        let answers = filter_answers(&response.questions, &answers);
-        // Preserve question order in the narrative, independent of ID ordering.
-        for question in &response.questions {
-            if let Some(answer) = answers.get(&question.id) {
-                if !accumulated.is_empty() && !accumulated.ends_with('\n') {
-                    accumulated.push('\n');
-                }
-                writeln!(accumulated, "Q: {}\nA: {}", question.text, answer)
-                    .expect("writing to a String cannot fail");
-            }
-        }
+        append_relevant_answers(&mut accumulated, &response.questions, &answers);
     }
     (accumulated, tags)
+}
+
+fn append_relevant_answers(accumulated: &mut String, questions: &[Question], answers: &Answers) {
+    use std::fmt::Write;
+
+    let answers = filter_answers(questions, answers);
+    // Preserve question order in the narrative, independent of ID ordering.
+    for question in questions {
+        if let Some(answer) = answers.get(&question.id) {
+            if !accumulated.is_empty() && !accumulated.ends_with('\n') {
+                accumulated.push('\n');
+            }
+            writeln!(accumulated, "Q: {}\nA: {}", question.text, answer)
+                .expect("writing to a String cannot fail");
+        }
+    }
 }
 
 pub struct EditorCollector;
@@ -544,6 +548,73 @@ pub fn run_clarify_batch<T: ollama_planner::LlmTransport>(
         Ok(()) => BatchOutcome::Completed,
         Err(outcome) => outcome,
     }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AnswerReport {
+    pub answered: usize,
+    pub finalized: usize,
+    pub queued: usize,
+    pub stopped: bool,
+}
+
+/// Answer one or all awaiting sessions. Save each answered task before opening
+/// another form; stopping leaves that session and the remaining sessions intact.
+pub fn answer_sessions<C: AnswerCollector>(
+    store: &mut ubu_core::Store,
+    task_id: Option<ubu_core::Id>,
+    collector: &mut C,
+    round_cap: u32,
+    save: &mut dyn FnMut(&ubu_core::Store) -> Result<(), String>,
+) -> Result<AnswerReport, String> {
+    use std::io::Write;
+
+    let ids: Vec<_> = match task_id {
+        Some(id) => {
+            let session = store
+                .clarify_sessions
+                .get(&id)
+                .ok_or_else(|| format!("no clarification session for {id}"))?;
+            if session.pending.is_empty() {
+                vec![]
+            } else {
+                vec![id]
+            }
+        }
+        None => store
+            .clarify_sessions
+            .iter()
+            .filter(|(_, session)| !session.pending.is_empty())
+            .map(|(id, _)| *id)
+            .collect(),
+    };
+    let mut report = AnswerReport::default();
+    for id in ids {
+        let task = store
+            .tasks
+            .get(&id)
+            .ok_or_else(|| format!("unknown task {id}"))?;
+        println!("Clarification answers: {} ({id})", task.title);
+        std::io::stdout()
+            .flush()
+            .map_err(|error| format!("flush task selection: {error}"))?;
+        let session = &store.clarify_sessions[&id];
+        let answers = collector.collect(&session.pending);
+        if answers.stop {
+            report.stopped = true;
+            break;
+        }
+        let session = store.clarify_sessions.get_mut(&id).unwrap();
+        append_relevant_answers(&mut session.accumulated, &session.pending, &answers);
+        session.pending.clear();
+        report.answered += 1;
+        if session.round >= round_cap {
+            report.queued += finalize_session(store, id)?.enqueued;
+            report.finalized += 1;
+        }
+        save(store).map_err(|error| format!("failed to save clarification answers: {error}"))?;
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
