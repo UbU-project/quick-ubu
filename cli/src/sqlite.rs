@@ -410,6 +410,8 @@ mod tests {
             .insert(id(2), "signature\nwith quotes: \"".into());
         store.category_colors.insert("work's 🗓".into(), "9".into());
         store.ollama_model = Some("local-model".into());
+        store.batch_passes.insert(format!("{}|tags", id(2)), 2);
+        store.batch_passes.insert(format!("{}|advise", id(2)), 1);
         store.poll_snapshot.insert(
             "calendar-event-雪".into(),
             "fingerprint|with\nquotes: \"".into(),
@@ -425,6 +427,56 @@ mod tests {
             });
         }
         store
+    }
+
+    #[test]
+    fn batch_passes_round_trip_update_and_clear_in_both_backends() {
+        let mut store = populated_store();
+        let sqlite = SqliteBackend::in_memory().unwrap();
+        let json = crate::persist::JsonBackend {
+            path: Path::new("memory").join(format!("{}.json", Uuid::new_v4())),
+        };
+        for backend in [&sqlite as &dyn StorageBackend, &json as &dyn StorageBackend] {
+            backend.save(&store).unwrap();
+            assert_eq!(backend.load().unwrap().batch_passes, store.batch_passes);
+            store
+                .batch_passes
+                .insert(format!("{}|tags", Uuid::from_u128(2)), u32::MAX);
+            backend.save(&store).unwrap();
+            assert_eq!(backend.load().unwrap(), store);
+            store.batch_passes.clear();
+            backend.save(&store).unwrap();
+            assert!(backend.load().unwrap().batch_passes.is_empty());
+            store = populated_store();
+        }
+        let row: String = sqlite
+            .connection
+            .query_row(
+                "SELECT data FROM singletons WHERE key = 'batch_passes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(row, "{}");
+    }
+
+    #[test]
+    fn legacy_stores_without_batch_passes_default_to_empty() {
+        let sqlite = SqliteBackend::in_memory().unwrap();
+        let mut store = populated_store();
+        sqlite.save(&store).unwrap();
+        sqlite
+            .connection
+            .execute("DELETE FROM singletons WHERE key = 'batch_passes'", [])
+            .unwrap();
+        store.batch_passes.clear();
+        assert_eq!(sqlite.load().unwrap(), store);
+        let mut legacy = serde_json::to_value(&store).unwrap();
+        legacy.as_object_mut().unwrap().remove("batch_passes");
+        let path = Path::new("memory").join(format!("{}.json", Uuid::new_v4()));
+        crate::test_support::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let json = crate::persist::JsonBackend { path };
+        assert_eq!(json.load().unwrap(), store);
     }
 
     #[test]

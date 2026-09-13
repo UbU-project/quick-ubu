@@ -180,3 +180,7 @@ impl BatchOutcome {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "batch_tests.rs"]
+mod tests;

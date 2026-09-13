@@ -1421,3 +1421,132 @@ fn clarify_without_candidates_exits_without_model_or_editor_and_preserves_store(
     }
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn batch_parses_defaults_only_and_connection_overrides() {
+    use clap::Parser;
+
+    let crate::Command::Batch {
+        only,
+        pass_cap,
+        batch_size,
+        history,
+        model,
+        ollama_url,
+        ollama_timeout,
+        ollama_total_timeout,
+    } = crate::Cli::try_parse_from(["quick-ubu", "batch"])
+        .unwrap()
+        .command
+    else {
+        panic!("expected batch");
+    };
+    assert_eq!(crate::batch_operations(only), &["tags", "advise"]);
+    assert_eq!((pass_cap, batch_size.get(), history), (3, 25, 20));
+    assert!(model.is_none());
+    assert_eq!(ollama_url, "http://localhost:11434");
+    assert_eq!((ollama_timeout, ollama_total_timeout), (300, 900));
+    for op in ["tags", "advise"] {
+        let crate::Command::Batch {
+            only,
+            pass_cap,
+            batch_size,
+            history,
+            model,
+            ollama_url,
+            ollama_timeout,
+            ollama_total_timeout,
+        } = crate::Cli::try_parse_from([
+            "quick-ubu",
+            "batch",
+            "--only",
+            op,
+            "--pass-cap",
+            "2",
+            "--batch-size",
+            "7",
+            "--history",
+            "0",
+            "--model",
+            "stub",
+            "--ollama-url",
+            "http://unused.invalid",
+            "--ollama-timeout",
+            "8",
+            "--ollama-total-timeout",
+            "19",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected batch");
+        };
+        assert_eq!(crate::batch_operations(only), &[op]);
+        assert_eq!((pass_cap, batch_size.get(), history), (2, 7, 0));
+        assert_eq!(model.as_deref(), Some("stub"));
+        assert_eq!(ollama_url, "http://unused.invalid");
+        assert_eq!((ollama_timeout, ollama_total_timeout), (8, 19));
+    }
+    for (flag, invalid) in [
+        ("--only", "clarify"),
+        ("--batch-size", "0"),
+        ("--pass-cap", "-1"),
+        ("--pass-cap", "4294967296"),
+        ("--batch-size", "oops"),
+        ("--history", "-1"),
+    ] {
+        assert!(crate::Cli::try_parse_from(["quick-ubu", "batch", flag, invalid]).is_err());
+    }
+}
+
+#[test]
+fn batch_zero_cap_completes_with_per_op_summaries_without_signals_or_http() {
+    let (directory, path) = memory_store();
+    assert_success(&quick_ubu(
+        &path,
+        &["add", "--title", "Task", "--duration", "30"],
+    ));
+    assert_success(&quick_ubu(&path, &["set-model", "unused"]));
+    let before: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    for only in [None, Some("tags"), Some("advise")] {
+        let mut args = vec!["batch", "--pass-cap", "0"];
+        if let Some(op) = only {
+            args.extend(["--only", op]);
+        }
+        let output = quick_ubu(&path, &args);
+        assert_success(&output);
+        assert!(output.stderr.is_empty());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        for op in ["tags", "advise"] {
+            assert_eq!(
+                stdout.contains(&format!(
+                    "batch {op}: tasks processed 0, proposals queued 0, errors 0"
+                )),
+                only.is_none() || only == Some(op)
+            );
+        }
+        assert!(stdout.ends_with("batch completed\n"));
+        assert_eq!(
+            serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+            before
+        );
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn batch_requires_model_before_work_and_empty_store_completes_with_override() {
+    let (directory, path) = memory_store();
+    let output = quick_ubu(&path, &["batch"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("no ollama model set"));
+    let output = quick_ubu(&path, &["batch", "--model", "unused"]);
+    assert_success(&output);
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .ends_with("batch completed\n"));
+    assert!(output.stderr.is_empty());
+    fs::remove_dir_all(directory).unwrap();
+}
