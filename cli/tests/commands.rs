@@ -1553,3 +1553,145 @@ fn batch_requires_model_before_work_and_empty_store_completes_with_override() {
     assert!(output.stderr.is_empty());
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn clarify_queue_persists_ready_state_without_model_and_requeue_preserves_progress() {
+    let (directory, path) = memory_store();
+    assert_success(&quick_ubu(
+        &path,
+        &["add", "--title", "Queued task", "--duration", "30"],
+    ));
+    let mut store: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let id = *store.tasks.keys().next().unwrap();
+    store.tasks.get_mut(&id).unwrap().detail = Some("Original lore".into());
+    test_support::seed(&path, &store);
+    let output = quick_ubu(&path, &["clarify", &id.to_string(), "--queue"]);
+    assert_success(&output);
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("Queued clarification: Queued task"));
+    let mut queued: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(queued.tasks, store.tasks);
+    assert!(queued.ollama_model.is_none());
+    assert_eq!(
+        queued.clarify_sessions[&id],
+        ubu_core::ClarifyState {
+            round: 0,
+            accumulated: "Original lore".into(),
+            pending: vec![],
+            tags: vec![],
+        }
+    );
+    queued.clarify_sessions.get_mut(&id).unwrap().round = 2;
+    queued
+        .clarify_sessions
+        .get_mut(&id)
+        .unwrap()
+        .accumulated
+        .push_str("\nAnswers so far");
+    test_support::seed(&path, &queued);
+    let output = quick_ubu(&path, &["clarify", &id.to_string(), "--queue"]);
+    assert_success(&output);
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("Clarification already queued"));
+    assert_eq!(
+        serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+        queued
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn async_clarify_flags_parse_queue_answer_prefix_and_matching_round_caps() {
+    use clap::Parser;
+    let crate::Command::Clarify { queue, .. } =
+        crate::Cli::try_parse_from(["quick-ubu", "clarify", "abcd", "--queue"])
+            .unwrap()
+            .command
+    else {
+        panic!("expected clarify");
+    };
+    assert!(queue);
+    let crate::Command::ClarifyAnswer { prefix, round_cap } =
+        crate::Cli::try_parse_from(["quick-ubu", "clarify-answer"])
+            .unwrap()
+            .command
+    else {
+        panic!("expected answer");
+    };
+    assert_eq!(prefix, None);
+    assert_eq!(round_cap, 5);
+    let crate::Command::ClarifyAnswer { prefix, round_cap } =
+        crate::Cli::try_parse_from(["quick-ubu", "clarify-answer", "abcd", "--round-cap", "2"])
+            .unwrap()
+            .command
+    else {
+        panic!("expected answer");
+    };
+    assert_eq!(prefix.as_deref(), Some("abcd"));
+    assert_eq!(round_cap, 2);
+    for (args, expected) in [
+        (vec!["quick-ubu", "batch"], 5),
+        (
+            vec![
+                "quick-ubu",
+                "batch",
+                "--only",
+                "clarify",
+                "--round-cap",
+                "2",
+            ],
+            2,
+        ),
+    ] {
+        let crate::Command::Batch {
+            round_cap, only, ..
+        } = crate::Cli::try_parse_from(args).unwrap().command
+        else {
+            panic!("expected batch");
+        };
+        assert_eq!(round_cap, expected);
+        assert!(crate::batch_operations(only).contains(&"clarify"));
+    }
+    for command in ["batch", "clarify-answer"] {
+        for invalid in ["-1", "oops", "4294967296"] {
+            assert!(
+                crate::Cli::try_parse_from(["quick-ubu", command, "--round-cap", invalid]).is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn clarify_answer_without_pending_questions_needs_no_model_or_editor() {
+    let (directory, path) = memory_store();
+    let output = quick_ubu(&path, &["clarify-answer"]);
+    assert_success(&output);
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("answered 0, finalized 0"));
+    assert_success(&quick_ubu(
+        &path,
+        &["add", "--title", "Ready task", "--duration", "30"],
+    ));
+    let store: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let id = *store.tasks.keys().next().unwrap();
+    let output = quick_ubu(&path, &["clarify-answer", &id.to_string()]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("no clarification session"));
+    assert_success(&quick_ubu(&path, &["clarify", &id.to_string(), "--queue"]));
+    let before: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let output = quick_ubu(&path, &["clarify-answer", &id.to_string()]);
+    assert_success(&output);
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("answered 0, finalized 0"));
+    assert_eq!(
+        serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+        before
+    );
+    fs::remove_dir_all(directory).unwrap();
+}

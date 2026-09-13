@@ -414,6 +414,22 @@ mod tests {
         store.ollama_model = Some("local-model".into());
         store.batch_passes.insert(format!("{}|tags", id(2)), 2);
         store.batch_passes.insert(format!("{}|advise", id(2)), 1);
+        store.clarify_sessions.insert(id(2), ubu_core::ClarifyState {
+            round: 2,
+            accumulated: "Existing lore\nQ: Ready?\nA: Y".into(),
+            pending: vec![
+                ubu_core::Question {
+                    id: "q1".into(), text: "Ready?".into(),
+                    kind: ubu_core::QuestionKind::YesNo, depends_on: None,
+                },
+                ubu_core::Question {
+                    id: "q2".into(), text: "Details?".into(),
+                    kind: ubu_core::QuestionKind::ShortText,
+                    depends_on: Some(("q1".into(), "y".into())),
+                },
+            ],
+            tags: vec!["focus".into()],
+        });
         store.poll_snapshot.insert(
             "calendar-event-雪".into(),
             "fingerprint|with\nquotes: \"".into(),
@@ -429,6 +445,41 @@ mod tests {
             });
         }
         store
+    }
+
+    #[test]
+    fn clarify_sessions_persist_and_legacy_stores_default_to_empty() {
+        let sqlite = SqliteBackend::in_memory().unwrap();
+        let mut store = populated_store();
+        sqlite.save(&store).unwrap();
+        assert_eq!(sqlite.load().unwrap(), store);
+        let data: String = sqlite
+            .connection
+            .query_row(
+                "SELECT data FROM singletons WHERE key = 'clarify_sessions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<std::collections::BTreeMap<Uuid, ubu_core::ClarifyState>>(&data)
+                .unwrap(),
+            store.clarify_sessions
+        );
+        let path = Path::new("memory").join(format!("{}.json", Uuid::new_v4()));
+        let json = crate::persist::JsonBackend { path: path.clone() };
+        json.save(&store).unwrap();
+        assert_eq!(json.load().unwrap(), store);
+        sqlite
+            .connection
+            .execute("DELETE FROM singletons WHERE key = 'clarify_sessions'", [])
+            .unwrap();
+        store.clarify_sessions.clear();
+        assert_eq!(sqlite.load().unwrap(), store);
+        let mut legacy = serde_json::to_value(&store).unwrap();
+        legacy.as_object_mut().unwrap().remove("clarify_sessions");
+        crate::test_support::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(json.load().unwrap(), store);
     }
 
     #[test]

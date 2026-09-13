@@ -634,3 +634,6 @@ fn automatic_selection_skips_generated_fixed_routines_and_selects_dynamic_tasks(
         assert_eq!(store, before);
     }
 }
+
+#[path = "clarify_session_tests.rs"]
+mod sessions;
