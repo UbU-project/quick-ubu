@@ -140,6 +140,9 @@ enum Command {
         only: Option<BatchOperation>,
         #[arg(long, default_value_t = 3)]
         pass_cap: u32,
+        /// Maximum generated clarification rounds; also use this cap with clarify-answer.
+        #[arg(long, default_value_t = 5)]
+        round_cap: u32,
         #[arg(long, default_value = "25")]
         batch_size: std::num::NonZeroUsize,
         #[arg(long, default_value_t = 20)]
@@ -350,13 +353,15 @@ enum PlannerChoice {
 enum BatchOperation {
     Tags,
     Advise,
+    Clarify,
 }
 
 fn batch_operations(only: Option<BatchOperation>) -> &'static [&'static str] {
     match only {
-        None => &["tags", "advise"],
+        None => &["tags", "advise", "clarify"],
         Some(BatchOperation::Tags) => &["tags"],
         Some(BatchOperation::Advise) => &["advise"],
+        Some(BatchOperation::Clarify) => &["clarify"],
     }
 }
 
@@ -558,9 +563,15 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
             if queue {
                 let created = clarify::queue_clarification(&mut store, task_id)?;
                 backend.save(&store)?;
-                println!("{}: {} ({task_id})",
-                    if created { "Queued clarification" } else { "Clarification already queued" },
-                    store.tasks[&task_id].title);
+                println!(
+                    "{}: {} ({task_id})",
+                    if created {
+                        "Queued clarification"
+                    } else {
+                        "Clarification already queued"
+                    },
+                    store.tasks[&task_id].title
+                );
                 return Ok(0);
             }
             let model = logic::resolve_model(&store, model)?;
@@ -590,17 +601,26 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
             );
         }
         Command::ClarifyAnswer { prefix, round_cap } => {
-            let task_id = prefix.as_deref().map(|prefix| persist::resolve_task_id(&store, prefix)).transpose()?;
+            let task_id = prefix
+                .as_deref()
+                .map(|prefix| persist::resolve_task_id(&store, prefix))
+                .transpose()?;
             let report = clarify::answer_sessions(
-                &mut store, task_id, &mut clarify::EditorCollector, round_cap,
+                &mut store,
+                task_id,
+                &mut clarify::EditorCollector,
+                round_cap,
                 &mut |store| backend.save(store),
             )?;
-            println!("clarify-answer: answered {}, finalized {}, proposals queued {}, stopped {}",
-                report.answered, report.finalized, report.queued, report.stopped);
+            println!(
+                "clarify-answer: answered {}, finalized {}, proposals queued {}, stopped {}",
+                report.answered, report.finalized, report.queued, report.stopped
+            );
         }
         Command::Batch {
             only,
             pass_cap,
+            round_cap,
             batch_size,
             history,
             model,
@@ -616,13 +636,14 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 timeout_secs: ollama_timeout,
                 total_timeout_secs: ollama_total_timeout,
             };
-            let outcome = batch::run_batch(
+            let outcome = batch::run_batch_operations(
                 &mut store,
                 &transport,
                 batch_operations(only),
                 pass_cap,
                 batch_size.get(),
                 history,
+                round_cap,
                 &interrupted,
                 &mut |store| backend.save(store),
             );

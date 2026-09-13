@@ -1436,13 +1436,14 @@ fn batch_parses_defaults_only_and_connection_overrides() {
         ollama_url,
         ollama_timeout,
         ollama_total_timeout,
+        ..
     } = crate::Cli::try_parse_from(["quick-ubu", "batch"])
         .unwrap()
         .command
     else {
         panic!("expected batch");
     };
-    assert_eq!(crate::batch_operations(only), &["tags", "advise"]);
+    assert_eq!(crate::batch_operations(only), &["tags", "advise", "clarify"]);
     assert_eq!((pass_cap, batch_size.get(), history), (3, 25, 20));
     assert!(model.is_none());
     assert_eq!(ollama_url, "http://localhost:11434");
@@ -1457,6 +1458,7 @@ fn batch_parses_defaults_only_and_connection_overrides() {
             ollama_url,
             ollama_timeout,
             ollama_total_timeout,
+            ..
         } = crate::Cli::try_parse_from([
             "quick-ubu",
             "batch",
@@ -1489,7 +1491,7 @@ fn batch_parses_defaults_only_and_connection_overrides() {
         assert_eq!((ollama_timeout, ollama_total_timeout), (8, 19));
     }
     for (flag, invalid) in [
-        ("--only", "clarify"),
+        ("--only", "crawler"),
         ("--batch-size", "0"),
         ("--pass-cap", "-1"),
         ("--pass-cap", "4294967296"),

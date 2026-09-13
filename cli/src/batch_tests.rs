@@ -191,13 +191,14 @@ fn default_operations_enqueue_all_batches_and_save_once_per_chunk() {
     ]);
     let mut snapshots = vec![];
     assert_eq!(
-        run_batch(
+        run_batch_operations(
             &mut store,
             &transport,
             crate::batch_operations(None),
             3,
             2,
             0,
+            5,
             &AtomicBool::new(false),
             &mut |store| {
                 snapshots.push(store.clone());

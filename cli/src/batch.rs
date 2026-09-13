@@ -171,6 +171,59 @@ pub fn run_batch<T: LlmTransport>(
     }
 }
 
+/// Dispatch all requested operations with the same interrupt flag and save boundary.
+pub fn run_batch_operations<T: LlmTransport>(
+    store: &mut Store,
+    transport: &T,
+    ops: &[&str],
+    pass_cap: u32,
+    batch_size: usize,
+    history_n: usize,
+    round_cap: u32,
+    interrupted: &AtomicBool,
+    save: &mut dyn FnMut(&Store) -> Result<(), String>,
+) -> BatchOutcome {
+    if batch_size == 0 {
+        return BatchOutcome::Failed("batch size must be greater than zero".into());
+    }
+    if let Some(name) = ops
+        .iter()
+        .find(|name| **name != "clarify" && !OPERATIONS.iter().any(|op| op.name == **name))
+    {
+        return BatchOutcome::Failed(format!("unknown batch operation: {name}"));
+    }
+    for op in ops {
+        let outcome = if *op == "clarify" {
+            crate::clarify::run_clarify_batch(
+                store,
+                transport,
+                round_cap,
+                history_n,
+                interrupted,
+                save,
+            )
+        } else {
+            run_batch(
+                store,
+                transport,
+                &[*op],
+                pass_cap,
+                batch_size,
+                history_n,
+                interrupted,
+                save,
+            )
+        };
+        if outcome != BatchOutcome::Completed {
+            return outcome;
+        }
+    }
+    match check_interrupt(store, interrupted, save) {
+        Ok(()) => BatchOutcome::Completed,
+        Err(outcome) => outcome,
+    }
+}
+
 impl BatchOutcome {
     pub fn exit_code(&self) -> u8 {
         match self {
