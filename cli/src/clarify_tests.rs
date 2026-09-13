@@ -505,3 +505,132 @@ fn unknown_task_is_rejected_before_stubs_and_empty_lore_is_written_literally() {
     clarify_task(&mut store, task.id, &transport, &mut collector, &[], 0).unwrap();
     assert_eq!(store.tasks[&task.id].detail.as_deref(), Some(""));
 }
+
+#[test]
+fn automatic_selection_uses_plan_order_and_accepts_all_empty_detail_forms() {
+    let now = history()[0].completed_at;
+    let mut store = Store::new();
+    for (n, detail, delay, status) in [
+        (1, None, 2, TaskStatus::Backlog),
+        (2, Some(" \n "), 1, TaskStatus::Scheduled),
+        (3, Some(""), 0, TaskStatus::Backlog),
+        (4, None, 0, TaskStatus::Done),
+        (5, None, 0, TaskStatus::Active),
+        (6, None, 0, TaskStatus::Deferred),
+        (7, Some("Already described"), 0, TaskStatus::Backlog),
+    ] {
+        let mut task = task();
+        task.id = Id::from_u128(n);
+        task.detail = detail.map(str::to_owned);
+        task.earliest_start = Some(now + Duration::days(delay));
+        task.status = status;
+        store.upsert_task(task);
+    }
+    for expected in [3, 2, 1] {
+        let before = store.clone();
+        assert_eq!(
+            next_task_to_clarify(&store, now).unwrap(),
+            Some(Id::from_u128(expected))
+        );
+        assert_eq!(store, before);
+        store
+            .tasks
+            .get_mut(&Id::from_u128(expected))
+            .unwrap()
+            .detail = Some("Clarified".into());
+    }
+    assert_eq!(next_task_to_clarify(&store, now).unwrap(), None);
+}
+
+#[test]
+fn automatic_selection_keeps_described_dependencies_in_the_plan() {
+    let now = history()[0].completed_at;
+    let mut store = Store::new();
+    let mut blocked = task();
+    blocked.detail = None;
+    blocked.blocked_by = vec![Id::from_u128(2)];
+    let mut blocker = task();
+    blocker.id = Id::from_u128(2);
+    blocker.earliest_start = Some(now + Duration::days(2));
+    let mut available = task();
+    available.id = Id::from_u128(3);
+    available.detail = None;
+    for task in [blocked, blocker, available] {
+        store.upsert_task(task);
+    }
+    assert_eq!(
+        next_task_to_clarify(&store, now).unwrap(),
+        Some(Id::from_u128(3))
+    );
+}
+
+#[test]
+fn automatic_selection_ignores_past_events_and_unplaced_conflicts() {
+    let now = history()[0].completed_at;
+    let mut store = Store::new();
+    let mut past = task();
+    past.detail = None;
+    past.status = TaskStatus::Scheduled;
+    past.pinned = Some(ubu_core::TimeWindow {
+        start: now - Duration::hours(2),
+        end: now - Duration::hours(1),
+    });
+    store.upsert_task(past);
+    let mut unplaced = task();
+    unplaced.id = Id::from_u128(2);
+    unplaced.detail = None;
+    unplaced.affect_cost = 101;
+    store.upsert_task(unplaced);
+    assert_eq!(next_task_to_clarify(&store, now).unwrap(), None);
+    let mut ongoing = task();
+    ongoing.id = Id::from_u128(3);
+    ongoing.detail = None;
+    ongoing.status = TaskStatus::Scheduled;
+    ongoing.pinned = Some(ubu_core::TimeWindow {
+        start: now - Duration::minutes(10),
+        end: now + Duration::minutes(20),
+    });
+    store.upsert_task(ongoing);
+    assert_eq!(next_task_to_clarify(&store, now).unwrap(), None);
+}
+
+#[test]
+fn automatic_selection_skips_generated_fixed_routines_and_selects_dynamic_tasks() {
+    use ubu_core::{expand_routine, Recurrence, RoutineTemplate, Tz};
+
+    let now = history()[0].completed_at;
+    let template = RoutineTemplate {
+        id: Id::from_u128(100),
+        title: "Fixed routine".into(),
+        tier: Tier::UserShared,
+        start_time: now.time(),
+        dynamic: false,
+        latest_tod: None,
+        duration: Duration::minutes(30),
+        affect_cost: 0,
+        category: None,
+        transparent: false,
+        reminders: vec![],
+        recurrence: Recurrence::Daily,
+        after: vec![],
+    };
+    let mut store = Store::new();
+    for routine in expand_routine(&[template], now.date_naive(), 1, Tz::UTC) {
+        assert!(routine.pinned.is_some());
+        assert!(routine.detail.is_none());
+        store.upsert_task(routine);
+    }
+    assert_eq!(store.tasks.len(), 1);
+    assert_eq!(next_task_to_clarify(&store, now).unwrap(), None);
+
+    for detail in [None, Some(""), Some(" \n ")] {
+        let mut dynamic = task();
+        dynamic.detail = detail.map(str::to_owned);
+        dynamic.earliest_start = Some(now + Duration::hours(1));
+        let selected = dynamic.id;
+        store.upsert_task(dynamic);
+        let before = store.clone();
+        assert_eq!(next_task_to_clarify(&store, now).unwrap(), Some(selected));
+        assert_eq!(store, before);
+    }
+}

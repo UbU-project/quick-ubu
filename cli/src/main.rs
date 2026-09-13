@@ -114,7 +114,8 @@ enum Command {
     ColorList,
     /// Interview the operator about a task using EDITOR (or VISUAL).
     Clarify {
-        prefix: String,
+        /// Omit to select the earliest open dynamic task with empty detail in the upcoming plan.
+        prefix: Option<String>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long, default_value_t = 5)]
@@ -487,8 +488,21 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
             max_rounds,
             history,
         } => {
-            let task_id = persist::resolve_task_id(&store, &prefix)?;
+            let task_id = match prefix {
+                Some(prefix) => persist::resolve_task_id(&store, &prefix)?,
+                None => match clarify::next_task_to_clarify(&store, Utc::now())? {
+                    Some(id) => id,
+                    None => {
+                        println!("No open task with empty detail found in the upcoming plan.");
+                        return Ok(());
+                    }
+                },
+            };
             let model = logic::resolve_model(&store, model)?;
+            println!("Clarifying: {} ({task_id})", store.tasks[&task_id].title);
+            io::stdout()
+                .flush()
+                .map_err(|error| format!("flush task selection: {error}"))?;
             let transport = OllamaHttpTransport {
                 base_url: "http://localhost:11434".into(),
                 model,

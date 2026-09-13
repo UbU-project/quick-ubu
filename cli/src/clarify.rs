@@ -2,6 +2,44 @@
 
 use std::collections::BTreeMap;
 
+/// Select a dynamic task by planned start, keeping all tasks in the plan so dependencies and
+/// occupied time still determine the interview order.
+pub fn next_task_to_clarify(
+    store: &ubu_core::Store,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<ubu_core::Id>, String> {
+    use ubu_core::{re_plan, AffectBudget, ComputeTarget, DeterministicPlacer, TaskStatus};
+
+    let needs_detail = |task: &ubu_core::Task| {
+        matches!(task.status, TaskStatus::Backlog | TaskStatus::Scheduled)
+            && task.pinned.is_none()
+            && task
+                .detail
+                .as_deref()
+                .map_or(true, |detail| detail.trim().is_empty())
+    };
+    if !store.tasks.values().any(needs_detail) {
+        return Ok(None);
+    }
+    let plan = re_plan(
+        store,
+        ComputeTarget::DesktopOllama,
+        now,
+        now,
+        &[],
+        &AffectBudget { cap: 100 },
+        &DeterministicPlacer,
+    )
+    .map_err(|error| format!("clarify planning failed: {error:?}"))?;
+    Ok(plan
+        .entries
+        .iter()
+        .filter(|entry| !entry.is_handle && entry.window.end > now)
+        .filter(|entry| store.tasks.get(&entry.item).is_some_and(needs_detail))
+        .min_by_key(|entry| (entry.window.start, entry.item))
+        .map(|entry| entry.item))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuestionKind {
     YesNo,

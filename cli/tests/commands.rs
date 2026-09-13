@@ -1244,12 +1244,19 @@ fn clarify_parses_defaults_overrides_and_rejects_invalid_arguments() {
         else {
             panic!("expected clarify");
         };
-        assert_eq!(prefix, "abcd");
+        assert_eq!(prefix.as_deref(), Some("abcd"));
         assert_eq!(model.as_deref(), expected_model);
         assert_eq!(max_rounds, rounds);
         assert_eq!(actual_history, history);
     }
-    assert!(crate::Cli::try_parse_from(["quick-ubu", "clarify"]).is_err());
+    let crate::Command::Clarify { prefix, .. } =
+        crate::Cli::try_parse_from(["quick-ubu", "clarify"])
+            .unwrap()
+            .command
+    else {
+        panic!("expected clarify");
+    };
+    assert_eq!(prefix, None);
     for flag in ["--max-rounds", "--history"] {
         for invalid in ["-1", "1.5", "abc", "18446744073709551616"] {
             assert!(
@@ -1321,7 +1328,7 @@ fn clarify_zero_round_command_saves_lore_without_model_calls_or_editor_use() {
     assert_success(&output);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("clarified {id}; enqueued 0, dropped_known 0, dropped_cycle 0\n")
+        format!("Clarifying: Task ({id})\nclarified {id}; enqueued 0, dropped_known 0, dropped_cycle 0\n")
     );
     assert!(output.stderr.is_empty());
     store.tasks.get_mut(&id).unwrap().detail = Some(String::new());
@@ -1342,5 +1349,75 @@ fn clarify_zero_round_command_saves_lore_without_model_calls_or_editor_use() {
         serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
         store
     );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn clarify_without_prefix_selects_earliest_and_prints_title_and_id_first() {
+    let (directory, path) = memory_store();
+    for title in ["Later", "Soon", "Completed", "Described"] {
+        assert_success(&quick_ubu(
+            &path,
+            &["add", "--title", title, "--duration", "30"],
+        ));
+    }
+    let mut store: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let now = chrono::Utc::now();
+    let mut selected = Uuid::nil();
+    for task in store.tasks.values_mut() {
+        match task.title.as_str() {
+            "Later" => task.earliest_start = Some(now + Duration::days(2)),
+            "Soon" => {
+                task.earliest_start = Some(now + Duration::days(1));
+                selected = task.id;
+            }
+            "Completed" => task.status = TaskStatus::Done,
+            "Described" => task.detail = Some("Already described".into()),
+            _ => unreachable!(),
+        }
+    }
+    test_support::seed(&path, &store);
+    let output = quick_ubu(
+        &path,
+        &["clarify", "--model", "unused", "--max-rounds", "0"],
+    );
+    assert_success(&output);
+    assert_eq!(String::from_utf8(output.stdout).unwrap(),
+        format!("Clarifying: Soon ({selected})\nclarified {selected}; enqueued 0, dropped_known 0, dropped_cycle 0\n"));
+    store.tasks.get_mut(&selected).unwrap().detail = Some(String::new());
+    assert_eq!(
+        serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+        store
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn clarify_without_candidates_exits_without_model_or_editor_and_preserves_store() {
+    let (directory, path) = memory_store();
+    let mut store = Store::new();
+    test_support::seed(&path, &store);
+    for populated in [false, true] {
+        if populated {
+            assert_success(&quick_ubu(
+                &path,
+                &["add", "--title", "Done", "--duration", "30"],
+            ));
+            store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            store.tasks.values_mut().next().unwrap().status = TaskStatus::Done;
+            test_support::seed(&path, &store);
+        }
+        let output = quick_ubu(&path, &["clarify"]);
+        assert_success(&output);
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "No open task with empty detail found in the upcoming plan.\n"
+        );
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+            store
+        );
+    }
     fs::remove_dir_all(directory).unwrap();
 }
