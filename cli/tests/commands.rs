@@ -1197,3 +1197,150 @@ fn classifier_handlers_apply_empty_selection_filters_and_save_without_http() {
     }
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn clarify_parses_defaults_overrides_and_rejects_invalid_arguments() {
+    use clap::Parser;
+
+    for (args, expected_model, rounds, history) in [
+        (vec!["quick-ubu", "clarify", "abcd"], None, 5, 20),
+        (
+            vec![
+                "quick-ubu",
+                "clarify",
+                "abcd",
+                "--model",
+                "test",
+                "--max-rounds",
+                "2",
+                "--history",
+                "7",
+            ],
+            Some("test"),
+            2,
+            7,
+        ),
+        (
+            vec![
+                "quick-ubu",
+                "clarify",
+                "abcd",
+                "--max-rounds",
+                "0",
+                "--history",
+                "0",
+            ],
+            None,
+            0,
+            0,
+        ),
+    ] {
+        let crate::Command::Clarify {
+            prefix,
+            model,
+            max_rounds,
+            history: actual_history,
+        } = crate::Cli::try_parse_from(args).unwrap().command
+        else {
+            panic!("expected clarify");
+        };
+        assert_eq!(prefix, "abcd");
+        assert_eq!(model.as_deref(), expected_model);
+        assert_eq!(max_rounds, rounds);
+        assert_eq!(actual_history, history);
+    }
+    assert!(crate::Cli::try_parse_from(["quick-ubu", "clarify"]).is_err());
+    for flag in ["--max-rounds", "--history"] {
+        for invalid in ["-1", "1.5", "abc", "18446744073709551616"] {
+            assert!(
+                crate::Cli::try_parse_from(["quick-ubu", "clarify", "abcd", flag, invalid])
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn clarify_resolves_task_and_model_before_any_transport_or_editor_use() {
+    let (directory, path) = memory_store();
+    assert_success(&quick_ubu(
+        &path,
+        &["add", "--title", "Task", "--duration", "30"],
+    ));
+    let store: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let task_id = store.tasks.keys().next().unwrap().to_string();
+    let output = quick_ubu(&path, &["clarify", "not-a-task"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("no task matches"));
+    let output = quick_ubu(&path, &["clarify", &task_id]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("no ollama model set"));
+    assert_eq!(
+        serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+        store
+    );
+    assert_success(&quick_ubu(
+        &path,
+        &["add", "--title", "Other task", "--duration", "30"],
+    ));
+    let output = quick_ubu(&path, &["clarify", ""]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("ambiguous prefix"));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn clarify_zero_round_command_saves_lore_without_model_calls_or_editor_use() {
+    let (directory, path) = memory_store();
+    assert_success(&quick_ubu(
+        &path,
+        &["add", "--title", "Task", "--duration", "30"],
+    ));
+    let mut store: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let id = *store.tasks.keys().next().unwrap();
+    let prefix = id.simple().to_string()[..8].to_owned();
+    let output = quick_ubu(
+        &path,
+        &[
+            "clarify",
+            &prefix,
+            "--model",
+            "unused",
+            "--max-rounds",
+            "0",
+            "--history",
+            "0",
+        ],
+    );
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("clarified {id}; enqueued 0, dropped_known 0, dropped_cycle 0\n")
+    );
+    assert!(output.stderr.is_empty());
+    store.tasks.get_mut(&id).unwrap().detail = Some(String::new());
+    assert_eq!(
+        serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+        store
+    );
+    // Persisted model follows the same resolution path as the other commands.
+    assert_success(&quick_ubu(&path, &["set-model", "unused"]));
+    store.ollama_model = Some("unused".into());
+    store.tasks.get_mut(&id).unwrap().detail = Some("Existing detail".into());
+    test_support::seed(&path, &store);
+    assert_success(&quick_ubu(
+        &path,
+        &["clarify", &prefix, "--max-rounds", "0"],
+    ));
+    assert_eq!(
+        serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+        store
+    );
+    fs::remove_dir_all(directory).unwrap();
+}

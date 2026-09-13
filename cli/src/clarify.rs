@@ -395,3 +395,7 @@ pub fn clarify_task<T: ollama_planner::LlmTransport, C: AnswerCollector>(
         tags.into_iter().map(|tag| (task_id, tag)).collect(),
     ))
 }
+
+#[cfg(test)]
+#[path = "clarify_tests.rs"]
+mod tests;
