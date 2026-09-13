@@ -8,6 +8,29 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum QuestionKind {
+    YesNo,
+    ShortText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Question {
+    pub id: String,
+    pub text: String,
+    pub kind: QuestionKind,
+    /// Only relevant if question `0` was answered with `1` (case-insensitive).
+    pub depends_on: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClarifyState {
+    pub round: u32,
+    pub accumulated: String,
+    pub pending: Vec<Question>,
+    pub tags: Vec<String>,
+}
+
 /// Stable identity for every stored entity.
 pub type Id = uuid::Uuid;
 

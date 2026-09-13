@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::decision::{DecisionRecord, PendingDecision};
 use crate::routine::RoutineTemplate;
-use crate::types::{Bundle, CoreError, Id, LogEntry, Objective, Preference, Task};
+use crate::types::{Bundle, ClarifyState, CoreError, Id, LogEntry, Objective, Preference, Task};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Store {
@@ -38,6 +38,8 @@ pub struct Store {
     /// "<task_id>|<op>" -> number of batch passes run (bounds reprocessing).
     #[serde(default)]
     pub batch_passes: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub clarify_sessions: BTreeMap<Id, ClarifyState>,
     /// append-only SessionLog
     pub log: Vec<LogEntry>,
 }

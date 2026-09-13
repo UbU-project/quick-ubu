@@ -1,6 +1,7 @@
 //! Task clarification engine and replaceable answer collection.
 
 use std::collections::BTreeMap;
+use ubu_core::{Question, QuestionKind};
 
 /// Select a dynamic task by planned start, keeping all tasks in the plan so dependencies and
 /// occupied time still determine the interview order.
@@ -38,21 +39,6 @@ pub fn next_task_to_clarify(
         .filter(|entry| store.tasks.get(&entry.item).is_some_and(needs_detail))
         .min_by_key(|entry| (entry.window.start, entry.item))
         .map(|entry| entry.item))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QuestionKind {
-    YesNo,
-    ShortText,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Question {
-    pub id: String,
-    pub text: String,
-    pub kind: QuestionKind,
-    /// Only relevant if question `0` was answered with `1` (case-insensitive).
-    pub depends_on: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
