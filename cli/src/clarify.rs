@@ -220,3 +220,178 @@ pub fn run_clarification<T: ollama_planner::LlmTransport, C: AnswerCollector>(
     }
     (accumulated, tags)
 }
+
+pub struct EditorCollector;
+
+fn render_editor_form(questions: &[Question]) -> String {
+    use std::fmt::Write;
+
+    let mut form = String::from(
+        "# Write answers after A1:, A2:, etc.; continuation lines are allowed.\n\
+         # Lines starting with # are comments. Keep the A-number labels unchanged.\n\
+         # Leave all answers empty (or abort the editor) to stop this interview.\n\n",
+    );
+    for (index, question) in questions.iter().enumerate() {
+        let label = match question.kind {
+            QuestionKind::YesNo => "[y/n]",
+            QuestionKind::ShortText => "[text]",
+        };
+        writeln!(
+            form,
+            "# Question {} (id {}) {label}",
+            index + 1,
+            serde_json::json!(question.id)
+        )
+        .unwrap();
+        if let Some((qid, want)) = &question.depends_on {
+            writeln!(
+                form,
+                "# (only if {}={})",
+                qid.replace(['\r', '\n'], " "),
+                want.replace(['\r', '\n'], " ")
+            )
+            .unwrap();
+        }
+        for line in question.text.lines() {
+            writeln!(form, "# {line}").unwrap();
+        }
+        writeln!(form, "A{}: \n", index + 1).unwrap();
+    }
+    form
+}
+
+fn parse_editor_answers(questions: &[Question], text: &str) -> Answers {
+    let mut raw: BTreeMap<usize, String> = BTreeMap::new();
+    let mut current = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some((number, answer)) = line.strip_prefix('A').and_then(|s| s.split_once(':')) {
+            if let Ok(number) = number.parse::<usize>() {
+                current = number
+                    .checked_sub(1)
+                    .filter(|index| *index < questions.len());
+                if let Some(index) = current {
+                    raw.insert(index, answer.trim().to_owned());
+                }
+                continue;
+            }
+        }
+        if let Some(index) = current {
+            let answer = raw.entry(index).or_default();
+            if !answer.is_empty() {
+                answer.push('\n');
+            }
+            answer.push_str(line);
+        }
+    }
+    let answers: BTreeMap<_, _> = raw
+        .into_iter()
+        .filter_map(|(index, answer)| {
+            let answer = answer.trim();
+            (!answer.is_empty()).then(|| (questions[index].id.clone(), answer.to_owned()))
+        })
+        .collect();
+    Answers {
+        stop: answers.is_empty(),
+        answers,
+    }
+}
+
+/// Removes the form on success, cancellation, and I/O errors.
+struct TemporaryForm(std::path::PathBuf);
+
+impl Drop for TemporaryForm {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+impl EditorCollector {
+    fn edit(&mut self, questions: &[Question]) -> Result<Answers, String> {
+        use std::io::Write;
+
+        let editor = std::env::var("EDITOR")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("VISUAL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .ok_or("set EDITOR or VISUAL to collect clarification answers")?;
+        let path =
+            std::env::temp_dir().join(format!("quick-ubu-clarify-{}.txt", uuid::Uuid::new_v4()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&path)
+            .map_err(|error| format!("create editor form: {error}"))?;
+        let _cleanup = TemporaryForm(path.clone());
+        file.write_all(render_editor_form(questions).as_bytes())
+            .map_err(|error| format!("write editor form: {error}"))?;
+        drop(file);
+        // The configured editor is a shell command (e.g. code --wait). Pass the
+        // filename separately so paths and form contents cannot become shell code.
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("exec {editor} \"$1\""))
+            .arg("quick-ubu-clarify")
+            .arg(&path)
+            .status()
+            .map_err(|error| format!("launch editor: {error}"))?;
+        if !status.success() {
+            return Err(format!("editor aborted ({status})"));
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("read editor answers: {error}"))?;
+        Ok(parse_editor_answers(questions, &text))
+    }
+}
+
+impl AnswerCollector for EditorCollector {
+    fn collect(&mut self, questions: &[Question]) -> Answers {
+        match self.edit(questions) {
+            Ok(answers) => answers,
+            Err(error) => {
+                eprintln!("clarification stopped: {error}");
+                Answers {
+                    stop: true,
+                    ..Answers::default()
+                }
+            }
+        }
+    }
+}
+
+/// Apply the same interview result for the CLI and other answer-collection UIs.
+pub fn clarify_task<T: ollama_planner::LlmTransport, C: AnswerCollector>(
+    store: &mut ubu_core::Store,
+    task_id: ubu_core::Id,
+    transport: &T,
+    collector: &mut C,
+    history: &[ubu_core::CompletedExample],
+    max_rounds: usize,
+) -> Result<crate::logic::AdviseReport, String> {
+    let task = store
+        .tasks
+        .get(&task_id)
+        .ok_or_else(|| format!("unknown task {task_id}"))?;
+    let (lore, tags) = run_clarification(task, transport, collector, history, max_rounds);
+    store
+        .tasks
+        .get_mut(&task_id)
+        .expect("task was just resolved")
+        .detail = Some(lore);
+    Ok(crate::logic::filter_and_enqueue_tags(
+        store,
+        tags.into_iter().map(|tag| (task_id, tag)).collect(),
+    ))
+}
