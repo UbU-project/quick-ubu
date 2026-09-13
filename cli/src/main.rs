@@ -41,6 +41,7 @@ use ubu_core::{
     DeterministicPlacer, Planner, Recurrence, RoutineTemplate, TaskStatus, Tier, Tz,
 };
 
+mod clarify;
 mod logic;
 mod persist;
 mod watch;
