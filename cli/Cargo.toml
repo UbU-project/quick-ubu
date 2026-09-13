@@ -10,6 +10,7 @@ name = "quick-ubu"
 path = "src/main.rs"
 
 [dependencies]
+ctrlc = "3"
 ubu_core = { path = "../core", package = "core" }
 ollama-planner = { path = "../ollama-planner" }
 gcal = { path = "../gcal" }

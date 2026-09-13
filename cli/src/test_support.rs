@@ -36,10 +36,10 @@ impl Stdin {
         STATE.with(|state| state.borrow_mut().input.read_line(buffer))
     }
 }
-pub struct Status(bool);
+pub struct Status(u8);
 impl Status {
     pub fn success(&self) -> bool {
-        self.0
+        self.0 == 0
     }
 }
 pub struct Output {
@@ -77,7 +77,7 @@ pub fn run(path: &Path, arguments: &[&str], input: &str) -> Output {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         Output {
-            status: Status(result.is_ok()),
+            status: Status(result.unwrap_or(1)),
             stdout: std::mem::take(&mut state.stdout),
             stderr: std::mem::take(&mut state.stderr),
         }

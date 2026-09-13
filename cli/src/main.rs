@@ -124,6 +124,25 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         history: usize,
     },
+    /// Run classifiers unattended, saving progress after every chunk.
+    Batch {
+        #[arg(long, value_enum)]
+        only: Option<BatchOperation>,
+        #[arg(long, default_value_t = 3)]
+        pass_cap: u32,
+        #[arg(long, default_value = "25")]
+        batch_size: std::num::NonZeroUsize,
+        #[arg(long, default_value_t = 20)]
+        history: usize,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value = "http://localhost:11434")]
+        ollama_url: String,
+        #[arg(long, default_value_t = 300)]
+        ollama_timeout: u64,
+        #[arg(long, default_value_t = 900)]
+        ollama_total_timeout: u64,
+    },
     SuggestTags {
         #[arg(long)]
         model: Option<String>,
@@ -317,9 +336,35 @@ enum PlannerChoice {
     Ollama,
 }
 
+#[derive(Clone, Debug, ValueEnum)]
+enum BatchOperation {
+    Tags,
+    Advise,
+}
+
+fn batch_operations(only: Option<BatchOperation>) -> &'static [&'static str] {
+    match only {
+        None => &["tags", "advise"],
+        Some(BatchOperation::Tags) => &["tags"],
+        Some(BatchOperation::Advise) => &["advise"],
+    }
+}
+
+fn batch_interrupt_flag() -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>, String> {
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The command harness never installs or sends real signals.
+    #[cfg(not(test))]
+    {
+        let flag = interrupted.clone();
+        ctrlc::set_handler(move || flag.store(true, std::sync::atomic::Ordering::SeqCst))
+            .map_err(|error| format!("failed to install batch interrupt handler: {error}"))?;
+    }
+    Ok(interrupted)
+}
+
 fn main() -> ExitCode {
     match run(Cli::parse()) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("quick-ubu: {error}");
             ExitCode::FAILURE
@@ -327,7 +372,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<(), String> {
+fn run(cli: Cli) -> Result<u8, String> {
     let backend = SqliteBackend::open(&cli.store)?;
     run_with_backend(cli, &backend)
 }
@@ -343,7 +388,7 @@ fn print_classifier_report(report: &logic::BatchReport) {
     );
 }
 
-fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String> {
+fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String> {
     let mut store = backend.load()?;
 
     match cli.command {
@@ -495,7 +540,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                     Some(id) => id,
                     None => {
                         println!("No open task with empty detail found in the upcoming plan.");
-                        return Ok(());
+                        return Ok(0);
                     }
                 },
             };
@@ -524,6 +569,41 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                 "clarified {task_id}; enqueued {}, dropped_known {}, dropped_cycle {}",
                 report.enqueued, report.dropped_known, report.dropped_cycle
             );
+        }
+        Command::Batch {
+            only,
+            pass_cap,
+            batch_size,
+            history,
+            model,
+            ollama_url,
+            ollama_timeout,
+            ollama_total_timeout,
+        } => {
+            let model = logic::resolve_model(&store, model)?;
+            let interrupted = batch_interrupt_flag()?;
+            let transport = OllamaHttpTransport {
+                base_url: ollama_url,
+                model,
+                timeout_secs: ollama_timeout,
+                total_timeout_secs: ollama_total_timeout,
+            };
+            let outcome = batch::run_batch(
+                &mut store,
+                &transport,
+                batch_operations(only),
+                pass_cap,
+                batch_size.get(),
+                history,
+                &interrupted,
+                &mut |store| backend.save(store),
+            );
+            match &outcome {
+                batch::BatchOutcome::Completed => println!("batch completed"),
+                batch::BatchOutcome::Interrupted => eprintln!("batch interrupted; progress saved"),
+                batch::BatchOutcome::Failed(error) => eprintln!("batch failed: {error}"),
+            }
+            return Ok(outcome.exit_code());
         }
         Command::SuggestTags {
             model,
@@ -759,7 +839,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
         }
     }
 
-    Ok(())
+    Ok(0)
 }
 
 fn review_decisions(store: &mut ubu_core::Store) -> Result<(), String> {

@@ -170,3 +170,13 @@ pub fn run_batch<T: LlmTransport>(
         Err(outcome) => outcome,
     }
 }
+
+impl BatchOutcome {
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::Completed => 0,
+            Self::Interrupted => 130,
+            Self::Failed(_) => 1,
+        }
+    }
+}
