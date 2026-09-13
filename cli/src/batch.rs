@@ -58,7 +58,7 @@ struct Summary {
     errors: usize,
 }
 
-fn save_progress(
+pub(crate) fn save_progress(
     store: &Store,
     save: &mut dyn FnMut(&Store) -> Result<(), String>,
 ) -> Result<(), BatchOutcome> {
@@ -66,7 +66,7 @@ fn save_progress(
         .map_err(|error| BatchOutcome::Failed(format!("failed to save batch progress: {error}")))
 }
 
-fn check_interrupt(
+pub(crate) fn check_interrupt(
     store: &Store,
     interrupted: &AtomicBool,
     save: &mut dyn FnMut(&Store) -> Result<(), String>,

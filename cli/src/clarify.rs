@@ -444,6 +444,108 @@ pub fn queue_clarification(
     Ok(true)
 }
 
+fn finalize_session(
+    store: &mut ubu_core::Store,
+    task_id: ubu_core::Id,
+) -> Result<crate::logic::AdviseReport, String> {
+    if !store.tasks.contains_key(&task_id) {
+        return Err(format!("unknown task {task_id}"));
+    }
+    let session = store
+        .clarify_sessions
+        .remove(&task_id)
+        .ok_or_else(|| format!("no clarification session for {task_id}"))?;
+    store.tasks.get_mut(&task_id).unwrap().detail = Some(session.accumulated);
+    Ok(crate::logic::filter_and_enqueue_tags(
+        store,
+        session.tags.into_iter().map(|tag| (task_id, tag)).collect(),
+    ))
+}
+
+fn generate_session_round<T: ollama_planner::LlmTransport>(
+    store: &mut ubu_core::Store,
+    task_id: ubu_core::Id,
+    transport: &T,
+    round_cap: u32,
+    history_n: usize,
+) -> Result<(bool, usize), String> {
+    let task = store
+        .tasks
+        .get(&task_id)
+        .ok_or_else(|| format!("unknown task {task_id}"))?;
+    let session = &store.clarify_sessions[&task_id];
+    let prompt = build_clarify_prompt(
+        task,
+        &session.accumulated,
+        &ubu_core::recent_completed_examples(store, history_n),
+    );
+    // Parse completely before touching session state.
+    let response = parse_clarify_response(&transport.generate(&prompt)?)?;
+    let session = store.clarify_sessions.get_mut(&task_id).unwrap();
+    for tag in response.tags {
+        if !session.tags.contains(&tag) {
+            session.tags.push(tag);
+        }
+    }
+    session.round += 1; // eligible sessions are strictly below round_cap
+    let finalize = response.done || (session.round >= round_cap && response.questions.is_empty());
+    session.pending = response.questions;
+    if finalize {
+        Ok((true, finalize_session(store, task_id)?.enqueued))
+    } else {
+        Ok((false, 0))
+    }
+}
+
+/// Generate one round for each ready session, furthest-advanced first.
+/// Awaiting answers requires operator work, not another model call.
+pub fn run_clarify_batch<T: ollama_planner::LlmTransport>(
+    store: &mut ubu_core::Store,
+    transport: &T,
+    round_cap: u32,
+    history_n: usize,
+    interrupted: &std::sync::atomic::AtomicBool,
+    save: &mut dyn FnMut(&ubu_core::Store) -> Result<(), String>,
+) -> crate::batch::BatchOutcome {
+    use crate::batch::{check_interrupt, save_progress, BatchOutcome};
+
+    let mut processed = 0;
+    let mut finalized = 0;
+    let mut queued = 0;
+    let mut errors = 0;
+    let result = (|| -> Result<(), BatchOutcome> {
+        check_interrupt(store, interrupted, save)?;
+        let mut eligible: Vec<_> = store
+            .clarify_sessions
+            .iter()
+            .filter(|(_, session)| session.pending.is_empty() && session.round < round_cap)
+            .map(|(id, session)| (*id, session.round))
+            .collect();
+        eligible.sort_by_key(|(id, round)| (std::cmp::Reverse(*round), *id));
+        for (task_id, _) in eligible {
+            check_interrupt(store, interrupted, save)?;
+            processed += 1;
+            match generate_session_round(store, task_id, transport, round_cap, history_n) {
+                Ok((finished, enqueued)) => {
+                    finalized += usize::from(finished);
+                    queued += enqueued;
+                }
+                Err(error) => {
+                    errors += 1;
+                    eprintln!("batch clarify {task_id} failed: {error}; session unchanged");
+                }
+            }
+            save_progress(store, save)?;
+        }
+        check_interrupt(store, interrupted, save)
+    })();
+    println!("batch clarify: tasks processed {processed}, finalized {finalized}, proposals queued {queued}, errors {errors}");
+    match result {
+        Ok(()) => BatchOutcome::Completed,
+        Err(outcome) => outcome,
+    }
+}
+
 #[cfg(test)]
 #[path = "clarify_tests.rs"]
 mod tests;
