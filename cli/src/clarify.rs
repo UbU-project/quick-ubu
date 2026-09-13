@@ -420,6 +420,30 @@ pub fn clarify_task<T: ollama_planner::LlmTransport, C: AnswerCollector>(
     ))
 }
 
+/// Queue once: repeating the command must not discard answers or pending questions.
+pub fn queue_clarification(
+    store: &mut ubu_core::Store,
+    task_id: ubu_core::Id,
+) -> Result<bool, String> {
+    let task = store
+        .tasks
+        .get(&task_id)
+        .ok_or_else(|| format!("unknown task {task_id}"))?;
+    if store.clarify_sessions.contains_key(&task_id) {
+        return Ok(false);
+    }
+    store.clarify_sessions.insert(
+        task_id,
+        ubu_core::ClarifyState {
+            round: 0,
+            accumulated: task.detail.clone().unwrap_or_default(),
+            pending: Vec::new(),
+            tags: Vec::new(),
+        },
+    );
+    Ok(true)
+}
+
 #[cfg(test)]
 #[path = "clarify_tests.rs"]
 mod tests;

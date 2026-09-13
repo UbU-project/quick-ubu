@@ -1240,6 +1240,7 @@ fn clarify_parses_defaults_overrides_and_rejects_invalid_arguments() {
             model,
             max_rounds,
             history: actual_history,
+            ..
         } = crate::Cli::try_parse_from(args).unwrap().command
         else {
             panic!("expected clarify");

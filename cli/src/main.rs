@@ -117,6 +117,9 @@ enum Command {
     Clarify {
         /// Omit to select the earliest open dynamic task with empty detail in the upcoming plan.
         prefix: Option<String>,
+        /// Queue question generation for batch processing without opening the editor.
+        #[arg(long)]
+        queue: bool,
         #[arg(long)]
         model: Option<String>,
         #[arg(long, default_value_t = 5)]
@@ -530,6 +533,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
         }
         Command::Clarify {
             prefix,
+            queue,
             model,
             max_rounds,
             history,
@@ -544,6 +548,14 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                     }
                 },
             };
+            if queue {
+                let created = clarify::queue_clarification(&mut store, task_id)?;
+                backend.save(&store)?;
+                println!("{}: {} ({task_id})",
+                    if created { "Queued clarification" } else { "Clarification already queued" },
+                    store.tasks[&task_id].title);
+                return Ok(0);
+            }
             let model = logic::resolve_model(&store, model)?;
             println!("Clarifying: {} ({task_id})", store.tasks[&task_id].title);
             io::stdout()
