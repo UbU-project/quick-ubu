@@ -136,16 +136,12 @@ pub fn select_active_tasks(store: &Store, f: &TaskFilter) -> Vec<Id> {
     tasks.into_iter().map(|task| task.id).collect()
 }
 
-pub fn build_advisor_prompt(store: &Store, history: &[CompletedExample]) -> (String, Vec<Id>) {
-    let index_map: Vec<_> = store
-        .tasks
-        .values()
-        .filter(|task| {
-            matches!(task.status, TaskStatus::Backlog | TaskStatus::Scheduled)
-                && task.pinned.is_none()
-        })
-        .map(|task| task.id)
-        .collect();
+pub fn build_advisor_prompt(
+    store: &Store,
+    task_ids: &[Id],
+    history: &[CompletedExample],
+) -> (String, Vec<Id>) {
+    let index_map = task_ids.to_vec();
     let indices: BTreeMap<_, _> = index_map
         .iter()
         .enumerate()
@@ -400,28 +396,25 @@ pub fn filter_and_enqueue(store: &mut Store, proposed: Proposed) -> AdviseReport
 
 pub fn advise(
     store: &mut Store,
+    task_ids: &[Id],
     transport: &dyn LlmTransport,
     model_override: Option<String>,
     history: &[CompletedExample],
 ) -> Result<AdviseReport, String> {
     // LlmTransport accepts only a prompt; the caller configures its model.
     resolve_model(store, model_override)?;
-    let (prompt, index_map) = build_advisor_prompt(store, history);
+    let (prompt, index_map) = build_advisor_prompt(store, task_ids, history);
     let text = transport.generate(&prompt)?;
     let proposed = parse_proposals(&text, &index_map)?;
     Ok(filter_and_enqueue(store, proposed))
 }
 
-pub fn build_tag_prompt(store: &Store, history: &[CompletedExample]) -> (String, Vec<Id>) {
-    let index_map = store
-        .tasks
-        .values()
-        .filter(|task| {
-            matches!(task.status, TaskStatus::Backlog | TaskStatus::Scheduled)
-                && task.pinned.is_none()
-        })
-        .map(|task| task.id)
-        .collect::<Vec<_>>();
+pub fn build_tag_prompt(
+    store: &Store,
+    task_ids: &[Id],
+    history: &[CompletedExample],
+) -> (String, Vec<Id>) {
+    let index_map = task_ids.to_vec();
     let vocabulary = store
         .tasks
         .values()
@@ -520,12 +513,13 @@ pub fn filter_and_enqueue_tags(store: &mut Store, proposed: Vec<(Id, String)>) -
 
 pub fn suggest_tags(
     store: &mut Store,
+    task_ids: &[Id],
     transport: &dyn LlmTransport,
     model_override: Option<String>,
     history: &[CompletedExample],
 ) -> Result<AdviseReport, String> {
     resolve_model(store, model_override)?;
-    let (prompt, index_map) = build_tag_prompt(store, history);
+    let (prompt, index_map) = build_tag_prompt(store, task_ids, history);
     #[cfg(debug_assertions)]
     println!("suggest-tags prompt:\n{prompt}");
     let text = transport.generate(&prompt)?;
@@ -1442,6 +1436,14 @@ mod tests {
         }
     }
 
+    fn active_ids(store: &Store) -> Vec<Id> {
+        store.tasks.values()
+            .filter(|task| matches!(task.status, TaskStatus::Backlog | TaskStatus::Scheduled)
+                && task.pinned.is_none())
+            .map(|task| task.id)
+            .collect()
+    }
+
     fn completed_prompt_examples() -> Vec<CompletedExample> {
         vec![
             CompletedExample {
@@ -1467,9 +1469,9 @@ mod tests {
         let (a, _, _) = graph_ids();
         store.tasks.get_mut(&a).unwrap().status = TaskStatus::Done;
         let history = completed_prompt_examples();
-        let (empty, ids) = build_tag_prompt(&store, &[]);
+        let (empty, ids) = build_tag_prompt(&store, &active_ids(&store), &[]);
         let section = "Examples — completed tasks and the tags they were given:\n- Archived research  →  [focus,research]\n- Archived walk  →  [outdoors]\n";
-        let (prompt, with_ids) = build_tag_prompt(&store, &history);
+        let (prompt, with_ids) = build_tag_prompt(&store, &active_ids(&store), &history);
         assert_eq!(with_ids, ids);
         assert!(!ids.contains(&a));
         assert_eq!(ids.len(), 2);
@@ -1487,9 +1489,9 @@ mod tests {
         let (a, _, _) = graph_ids();
         store.tasks.get_mut(&a).unwrap().status = TaskStatus::Done;
         let history = completed_prompt_examples();
-        let (empty, ids) = build_advisor_prompt(&store, &[]);
+        let (empty, ids) = build_advisor_prompt(&store, &active_ids(&store), &[]);
         let section = "Recently completed tasks (context):\n- Archived research  [work]  tags: [focus,research]\n- Archived walk  []  tags: [outdoors]\n";
-        let (prompt, with_ids) = build_advisor_prompt(&store, &history);
+        let (prompt, with_ids) = build_advisor_prompt(&store, &active_ids(&store), &history);
         assert_eq!(with_ids, ids);
         assert!(!ids.contains(&a));
         assert_eq!(ids.len(), 2);
@@ -1525,19 +1527,20 @@ mod tests {
         for limit in [0, 1, 20] {
             let history = recent_completed_examples(&store, limit);
             assert_eq!(history.len(), limit.min(2));
+            let selected = active_ids(&store);
             let before = store.clone();
             let tags = StubTransport::returning(Ok(r#"{"tags":[]}"#.into()));
-            suggest_tags(&mut store, &tags, Some("stub".into()), &history).unwrap();
+            suggest_tags(&mut store, &selected, &tags, Some("stub".into()), &history).unwrap();
             assert_eq!(
                 *tags.prompts.borrow(),
-                vec![build_tag_prompt(&before, &history).0]
+                vec![build_tag_prompt(&before, &active_ids(&before), &history).0]
             );
             let advisor =
                 StubTransport::returning(Ok(r#"{"dependencies":[],"preferences":[]}"#.into()));
-            advise(&mut store, &advisor, Some("stub".into()), &history).unwrap();
+            advise(&mut store, &selected, &advisor, Some("stub".into()), &history).unwrap();
             assert_eq!(
                 *advisor.prompts.borrow(),
-                vec![build_advisor_prompt(&before, &history).0]
+                vec![build_advisor_prompt(&before, &active_ids(&before), &history).0]
             );
             assert_eq!(store, before);
 
@@ -1545,12 +1548,12 @@ mod tests {
             let invalid_tags =
                 StubTransport::returning(Ok(r#"{"tags":[{"task":2,"tag":"x"}]}"#.into()));
             assert!(
-                suggest_tags(&mut store, &invalid_tags, Some("stub".into()), &history).is_err()
+                suggest_tags(&mut store, &selected, &invalid_tags, Some("stub".into()), &history).is_err()
             );
             let invalid_advisor = StubTransport::returning(Ok(
                 r#"{"dependencies":[{"blocked":1,"blocker":2}],"preferences":[]}"#.into(),
             ));
-            assert!(advise(&mut store, &invalid_advisor, Some("stub".into()), &history).is_err());
+            assert!(advise(&mut store, &selected, &invalid_advisor, Some("stub".into()), &history).is_err());
             assert_eq!(store, before);
         }
     }
@@ -1734,7 +1737,7 @@ mod tests {
         store.tasks.get_mut(&a).unwrap().category = Some("work".into());
         store.tasks.get_mut(&b).unwrap().tags = vec!["alpha".into(), "retired".into()];
         store.tasks.get_mut(&b).unwrap().status = TaskStatus::Done;
-        let (prompt, ids) = build_tag_prompt(&store, &[]);
+        let (prompt, ids) = build_tag_prompt(&store, &active_ids(&store), &[]);
         assert_eq!(ids, vec![a, c]);
         let vocabulary = prompt
             .lines()
@@ -1753,7 +1756,7 @@ mod tests {
             json!({"title":"Alpha", "category":"work", "tags":["zebra", "alpha"]})
         );
         assert!(prompt.contains("Prefer to reuse existing tags"));
-        assert_eq!(build_tag_prompt(&store, &[]), (prompt, ids));
+        assert_eq!(build_tag_prompt(&store, &active_ids(&store), &[]), (prompt, ids));
     }
 
     #[test]
@@ -1800,17 +1803,18 @@ mod tests {
         store.ollama_model = Some("test-model".into());
         let transport =
             StubTransport::returning(Ok(r#"{"tags":[{"task":1,"tag":"focus"}]}"#.into()));
+        let selected = active_ids(&store);
         let before = store.clone();
-        let report = suggest_tags(&mut store, &transport, None, &[]).unwrap();
+        let report = suggest_tags(&mut store, &selected, &transport, None, &[]).unwrap();
         assert_eq!(report.enqueued, 1);
         assert_eq!(
             transport.prompts.borrow().as_slice(),
-            &[build_tag_prompt(&before, &[]).0]
+            &[build_tag_prompt(&before, &active_ids(&before), &[]).0]
         );
         assert!(store.tasks[&a].tags.is_empty());
         let decision = store.pending_decisions[0].id;
         resolve_decision(&mut store, decision, Answer::Confirm).unwrap();
-        let prompt = build_advisor_prompt(&store, &[]).0;
+        let prompt = build_advisor_prompt(&store, &active_ids(&store), &[]).0;
         for (index, task) in store.tasks.values().enumerate() {
             let prefix = format!("[{}] ", index + 1);
             let data: Value = serde_json::from_str(
@@ -1823,7 +1827,7 @@ mod tests {
             assert_eq!(data["tags"], json!(task.tags));
         }
         assert_eq!(
-            suggest_tags(&mut store, &transport, None, &[])
+            suggest_tags(&mut store, &selected, &transport, None, &[])
                 .unwrap()
                 .dropped_known,
             1
@@ -1835,8 +1839,9 @@ mod tests {
     fn tagging_transport_parse_and_model_errors_leave_store_unchanged() {
         let mut store = graph_store();
         let transport = StubTransport::returning(Ok("{}".into()));
+        let selected = active_ids(&store);
         let before = store.clone();
-        assert!(suggest_tags(&mut store, &transport, None, &[]).is_err());
+        assert!(suggest_tags(&mut store, &selected, &transport, None, &[]).is_err());
         assert!(transport.prompts.borrow().is_empty());
         assert_eq!(store, before);
         for response in [
@@ -1844,7 +1849,7 @@ mod tests {
             Ok(r#"{"tags":[{"task":1,"tag":"valid"},{"task":999,"tag":"invalid"}]}"#.into()),
         ] {
             let transport = StubTransport::returning(response);
-            assert!(suggest_tags(&mut store, &transport, Some("override-model".into()), &[]).is_err());
+            assert!(suggest_tags(&mut store, &selected, &transport, Some("override-model".into()), &[]).is_err());
             assert_eq!(store, before);
         }
     }
@@ -1859,7 +1864,7 @@ mod tests {
         store.tasks.get_mut(&a).unwrap().status = TaskStatus::Done;
         let before = store.clone();
         assert_eq!(enqueue_incomparable_pairs(&mut store), 0);
-        let (_, advisor_ids) = build_advisor_prompt(&store, &[]);
+        let (_, advisor_ids) = build_advisor_prompt(&store, &active_ids(&store), &[]);
         assert_eq!(advisor_ids, vec![b, c]);
         let plan = re_plan(&store, ComputeTarget::DesktopOllama, fixed_time(), fixed_time(), &[],
             &AffectBudget { cap: 100 }, &DeterministicPlacer).unwrap();
@@ -2364,7 +2369,7 @@ mod tests {
         pref_add_ids(&mut store, b, c, false).unwrap();
         pref_add_ids(&mut store, a, b, true).unwrap();
 
-        let (prompt, map) = build_advisor_prompt(&store, &[]);
+        let (prompt, map) = build_advisor_prompt(&store, &active_ids(&store), &[]);
         assert_eq!(map, vec![a, b, c]);
         for (index, title) in [(1, "Alpha"), (2, "Bravo"), (3, "Charlie")] {
             let prefix = format!("[{index}] ");
@@ -2407,7 +2412,7 @@ mod tests {
         ] {
             assert!(prompt.contains(instruction));
         }
-        assert_eq!(build_advisor_prompt(&store, &[]), (prompt, map));
+        assert_eq!(build_advisor_prompt(&store, &active_ids(&store), &[]), (prompt, map));
     }
 
     #[test]
@@ -2438,7 +2443,7 @@ mod tests {
             person: "Editor".into(),
             note: Some("Send a draft".into()),
         });
-        let (prompt, _) = build_advisor_prompt(&store, &[]);
+        let (prompt, _) = build_advisor_prompt(&store, &active_ids(&store), &[]);
         let row = prompt
             .lines()
             .find_map(|line| line.strip_prefix("[1] "))
@@ -2769,6 +2774,7 @@ mod tests {
         let (a, b, c) = graph_ids();
         let mut store = graph_store();
         set_model(&mut store, "stub-model".into());
+        let selected = active_ids(&store);
         let before = store.clone();
         let stub = StubTransport::returning(Ok(json!({
             "dependencies": [{"blocked": 1, "blocker": 2}],
@@ -2776,7 +2782,7 @@ mod tests {
         })
         .to_string()));
         assert_eq!(
-            advise(&mut store, &stub, None, &[]),
+            advise(&mut store, &selected, &stub, None, &[]),
             Ok(AdviseReport {
                 enqueued: 2,
                 ..AdviseReport::default()
@@ -2784,7 +2790,7 @@ mod tests {
         );
         assert_eq!(
             *stub.prompts.borrow(),
-            vec![build_advisor_prompt(&before, &[]).0]
+            vec![build_advisor_prompt(&before, &active_ids(&before), &[]).0]
         );
         assert_eq!(store.tasks, before.tasks);
         assert_eq!(store.bundles, before.bundles);
@@ -2816,17 +2822,18 @@ mod tests {
     #[test]
     fn advise_errors_leave_store_unchanged_and_missing_model_never_calls_transport() {
         let mut store = graph_store();
+        let selected = active_ids(&store);
         let before = store.clone();
         let stub = StubTransport::returning(Ok("invalid JSON".into()));
         assert_eq!(
-            advise(&mut store, &stub, None, &[]),
+            advise(&mut store, &selected, &stub, None, &[]),
             Err("no ollama model set; run: quick-ubu set-model <name>".into())
         );
         assert!(stub.prompts.borrow().is_empty());
         assert_eq!(store, before);
         for response in [Err("transport failed".into()), Ok("invalid JSON".into()), Ok(r#"{"dependencies":[{"blocked":1,"blocker":2}],"preferences":[{"a":2,"b":4,"relation":"indifferent"}]}"#.into())] {
             let stub = StubTransport::returning(response);
-            assert!(advise(&mut store, &stub, Some("override".into()), &[]).is_err());
+            assert!(advise(&mut store, &selected, &stub, Some("override".into()), &[]).is_err());
             assert_eq!(stub.prompts.borrow().len(), 1);
             assert_eq!(store, before);
         }
@@ -2835,9 +2842,10 @@ mod tests {
     #[test]
     fn advise_empty_store_still_queries_once_with_override() {
         let mut store = Store::new();
+        let selected = active_ids(&store);
         let stub = StubTransport::returning(Ok(r#"{"dependencies":[],"preferences":[]}"#.into()));
         assert_eq!(
-            advise(&mut store, &stub, Some("override".into()), &[]),
+            advise(&mut store, &selected, &stub, Some("override".into()), &[]),
             Ok(AdviseReport::default())
         );
         assert_eq!(stub.prompts.borrow().len(), 1);

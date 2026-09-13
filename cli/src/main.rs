@@ -444,8 +444,9 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                 total_timeout_secs: 900,
             };
             let history = ubu_core::recent_completed_examples(&store, history);
+            let selected = logic::select_active_tasks(&store, &logic::TaskFilter::default());
             let report =
-                logic::suggest_tags(&mut store, &transport, Some(resolved_model), &history)?;
+                logic::suggest_tags(&mut store, &selected, &transport, Some(resolved_model), &history)?;
             backend.save(&store)?;
             println!("enqueued {}, dropped_known {}, dropped_cycle {}",
                 report.enqueued, report.dropped_known, report.dropped_cycle);
@@ -465,8 +466,9 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<(), String
                 total_timeout_secs: ollama_total_timeout,
             };
             let history = ubu_core::recent_completed_examples(&store, history);
+            let selected = logic::select_active_tasks(&store, &logic::TaskFilter::default());
             let report =
-                logic::advise(&mut store, &transport, Some(resolved_model), &history)?;
+                logic::advise(&mut store, &selected, &transport, Some(resolved_model), &history)?;
             backend.save(&store)?;
             println!(
                 "enqueued {}, dropped_known {}, dropped_cycle {}",
