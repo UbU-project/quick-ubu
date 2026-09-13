@@ -540,11 +540,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn total_deadline_cancels_stalled_and_progressing_streams() {
         for chunks in [
-            vec![(100, record("{", false)), (501, record("}", true))],
+            vec![(100, record("{", false)), (801, record("}", true))],
             vec![
                 (200, record("{", false)),
                 (200, record(" ", false)),
-                (201, record("}", true)),
+                (501, record("}", true)),
             ],
         ] {
             let start = tokio::time::Instant::now();
