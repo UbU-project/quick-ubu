@@ -114,6 +114,7 @@ impl StorageBackend for SqliteBackend {
                 "decision_history" => singleton!(decision_history),
                 "ollama_model" => singleton!(ollama_model),
                 "poll_snapshot" => singleton!(poll_snapshot),
+                "batch_passes" => singleton!(batch_passes),
                 _ => {}
             }
         }
@@ -195,6 +196,7 @@ impl StorageBackend for SqliteBackend {
                 ),
                 ("ollama_model", serde_json::to_string(&store.ollama_model)),
                 ("poll_snapshot", serde_json::to_string(&store.poll_snapshot)),
+                ("batch_passes", serde_json::to_string(&store.batch_passes)),
             ]
             .into_iter()
             .map(|(key, data)| {

@@ -35,6 +35,9 @@ pub struct Store {
     /// Google event id -> change fingerprint, from the last poll cycle.
     #[serde(default)]
     pub poll_snapshot: BTreeMap<String, String>,
+    /// "<task_id>|<op>" -> number of batch passes run (bounds reprocessing).
+    #[serde(default)]
+    pub batch_passes: BTreeMap<String, u32>,
     /// append-only SessionLog
     pub log: Vec<LogEntry>,
 }
