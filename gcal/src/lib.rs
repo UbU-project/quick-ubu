@@ -1014,6 +1014,143 @@ mod stub_tests {
     }
 
     #[tokio::test]
+    async fn delete_request_uses_delete_and_accepts_success_not_found_and_gone_without_network() {
+        for (status, succeeds) in [
+            (204, true),
+            (404, true),
+            (410, true),
+            (403, false),
+            (500, false),
+        ] {
+            let transport = GoogleCalendarTransport::new("unused", "unused", "primary");
+            transport
+                .import_stub
+                .import_responses
+                .borrow_mut()
+                .push_back((status, "test body".into()));
+            let result = transport
+                .delete_event_with_token("retired/event", "stub-token")
+                .await;
+            assert_eq!(result.is_ok(), succeeds);
+            if !succeeds {
+                assert!(result.unwrap_err().contains("test body"));
+            }
+            let requests = transport.import_stub.import_requests.borrow();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].method(), reqwest::Method::DELETE);
+            assert_eq!(
+                requests[0].url().as_str(),
+                "https://www.googleapis.com/calendar/v3/calendars/primary/events/retired%2Fevent"
+            );
+            assert_eq!(requests[0].headers()["authorization"], "Bearer stub-token");
+        }
+    }
+
+    #[tokio::test]
+    async fn export_deletes_queued_events_before_creating_children_and_does_not_repeat_deletions() {
+        let mut store = Store::new();
+        store.pending_event_deletions = vec!["parent-event".into(), "older-event".into()];
+        for n in [1, 2] {
+            store.upsert_task(task(n, "Child", Tier::UserShared, false, None));
+        }
+        let transport = StubTransport::default();
+        let report = export_plan(
+            &mut store,
+            &plan(&[1, 2]),
+            &transport,
+            &BTreeMap::new(),
+            Tier::UserShared,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.created, 2);
+        assert!(store.pending_event_deletions.is_empty());
+        assert!(matches!(transport.calls.borrow().as_slice(),
+            [StubCall::Delete(a), StubCall::Delete(b), StubCall::Create(_), StubCall::Create(_)]
+            if a == "parent-event" && b == "older-event"));
+        let report = export_plan(
+            &mut store,
+            &plan(&[1, 2]),
+            &transport,
+            &BTreeMap::new(),
+            Tier::UserShared,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.skipped, 2);
+        assert_eq!(transport.calls.borrow().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn export_keeps_failed_deletions_for_retry_and_cleans_up_without_plan_entries() {
+        let mut store = Store::new();
+        store.pending_event_deletions = vec!["parent".into(), "later".into()];
+        store.upsert_task(task(1, "Child", Tier::UserShared, false, None));
+        let transport = StubTransport {
+            delete_error: Some("delete failed".into()),
+            ..StubTransport::default()
+        };
+        let before = store.clone();
+        assert_eq!(
+            export_plan(
+                &mut store,
+                &plan(&[1]),
+                &transport,
+                &BTreeMap::new(),
+                Tier::UserShared
+            )
+            .await,
+            Err("delete failed".into())
+        );
+        assert_eq!(store, before);
+        assert_eq!(
+            *transport.calls.borrow(),
+            vec![StubCall::Delete("parent".into())]
+        );
+        let transport = StubTransport::default();
+        export_plan(
+            &mut store,
+            &plan(&[]),
+            &transport,
+            &BTreeMap::new(),
+            Tier::UserShared,
+        )
+        .await
+        .unwrap();
+        assert!(store.pending_event_deletions.is_empty());
+        assert_eq!(
+            *transport.calls.borrow(),
+            vec![
+                StubCall::Delete("parent".into()),
+                StubCall::Delete("later".into())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn deleted_parent_stays_removed_from_queue_if_child_creation_fails() {
+        let mut store = Store::new();
+        store.pending_event_deletions = vec!["parent".into()];
+        store.upsert_task(task(1, "Child", Tier::UserShared, false, None));
+        let transport = StubTransport::with_create_error("create failed");
+        assert!(export_plan(
+            &mut store,
+            &plan(&[1]),
+            &transport,
+            &BTreeMap::new(),
+            Tier::UserShared
+        )
+        .await
+        .is_err());
+        assert!(store.pending_event_deletions.is_empty());
+        assert!(store.calendar_links.is_empty());
+        assert!(matches!(
+            transport.calls.borrow().as_slice(),
+            [StubCall::Delete(_), StubCall::Create(_)]
+        ));
+    }
+
+    #[tokio::test]
     async fn stub_transport_records_calls_and_injects_errors() {
         let create_stub = StubTransport::with_create_error("create failed");
         assert_eq!(

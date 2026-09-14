@@ -317,3 +317,7 @@ pub fn decompose_task<T: LlmTransport, R: DecompositionReviewer>(
         clamped: final_proposal.iter().filter(|p| p.clamped).count(),
     }))
 }
+
+#[cfg(test)]
+#[path = "decompose_tests.rs"]
+mod tests;

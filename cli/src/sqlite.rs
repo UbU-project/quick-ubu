@@ -438,6 +438,11 @@ mod tests {
             "calendar-event-雪".into(),
             "fingerprint|with\nquotes: \"".into(),
         );
+        store.decomposition_history.push(ubu_core::DecompositionRecord {
+            id: id(70), parent: store.tasks[&id(2)].clone(),
+            child_ids: vec![id(72), id(71)], at,
+        });
+        store.pending_event_deletions = vec!["retired-'雪'".into(), "older-event".into()];
         // The first two entries share a timestamp; their insertion order is meaningful.
         for (n, seconds) in [(30, 0), (29, 0), (28, 1)] {
             store.log.push(LogEntry {
@@ -449,6 +454,48 @@ mod tests {
             });
         }
         store
+    }
+
+    #[test]
+    fn decomposition_fields_persist_as_singletons_and_legacy_stores_default_to_empty() {
+        let sqlite = SqliteBackend::in_memory().unwrap();
+        let mut store = populated_store();
+        sqlite.save(&store).unwrap();
+        let json = crate::persist::JsonBackend {
+            path: "memory/decomposition.json".into(),
+        };
+        json.save(&store).unwrap();
+        assert_eq!(json.load().unwrap(), store);
+        assert_eq!(sqlite.load().unwrap(), store);
+        for key in ["decomposition_history", "pending_event_deletions"] {
+            let data: String = sqlite
+                .connection
+                .query_row("SELECT data FROM singletons WHERE key = ?1", [key], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&data).unwrap(),
+                serde_json::to_value(&store).unwrap()[key]
+            );
+            sqlite
+                .connection
+                .execute("DELETE FROM singletons WHERE key = ?1", [key])
+                .unwrap();
+        }
+        let mut legacy = serde_json::to_value(&store).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("decomposition_history");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_event_deletions");
+        store.decomposition_history.clear();
+        store.pending_event_deletions.clear();
+        assert_eq!(sqlite.load().unwrap(), store);
+        assert_eq!(serde_json::from_value::<Store>(legacy).unwrap(), store);
     }
 
     #[test]

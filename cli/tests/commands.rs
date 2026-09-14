@@ -27,6 +27,63 @@ fn quick_ubu_with_input(store: &Path, command: &str, input: &str) -> Output {
 }
 
 #[test]
+fn decompose_parses_prefix_model_history_and_fails_before_external_work_for_missing_inputs() {
+    use clap::Parser;
+    for args in [
+        vec!["quick-ubu", "decompose", "abc"],
+        vec![
+            "quick-ubu",
+            "decompose",
+            "abc",
+            "--model",
+            "local",
+            "--history",
+            "7",
+        ],
+    ] {
+        let crate::Command::Decompose {
+            prefix,
+            model,
+            history,
+        } = crate::Cli::try_parse_from(&args).unwrap().command
+        else {
+            panic!("expected decompose");
+        };
+        assert_eq!(prefix, "abc");
+        assert_eq!(
+            model.as_deref(),
+            if args.len() == 3 { None } else { Some("local") }
+        );
+        assert_eq!(history, if args.len() == 3 { 20 } else { 7 });
+    }
+    assert!(crate::Cli::try_parse_from(["quick-ubu", "decompose"]).is_err());
+    assert!(
+        crate::Cli::try_parse_from(["quick-ubu", "decompose", "abc", "--history", "-1"]).is_err()
+    );
+    let (_, path) = memory_store();
+    let output = quick_ubu(&path, &["decompose", "abc"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("no task matches"));
+    assert_success(&quick_ubu(
+        &path,
+        &["add", "--title", "Parent", "--duration", "60"],
+    ));
+    let before: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let id = before.tasks.keys().next().unwrap().to_string();
+    let output = quick_ubu(&path, &["decompose", &id]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("no ollama model set"));
+    assert_eq!(
+        serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+        before
+    );
+}
+
+#[test]
 fn prioritize_enqueues_before_review_and_quitting_keeps_the_queue_in_order() {
     let (directory, store_path) = memory_store();
     for title in ["Alpha", "Bravo", "Charlie"] {
