@@ -318,6 +318,27 @@ pub fn decompose_task<T: LlmTransport, R: DecompositionReviewer>(
     }))
 }
 
+/// Restore exactly the recorded parent and retire its direct children locally.
+/// The caller persists the result with one atomic save.
+pub fn undo_decomposition(store: &mut Store, record_index: usize) -> Result<(), String> {
+    let record = store
+        .decomposition_history
+        .get(record_index)
+        .ok_or_else(|| format!("no decomposition at index {record_index}"))?
+        .clone();
+    store.tasks.insert(record.parent.id, record.parent);
+    for child_id in record.child_ids {
+        // Missing tasks are harmless; clean up any remaining event metadata too.
+        if let Some(event_id) = store.calendar_links.remove(&child_id) {
+            store.pending_event_deletions.push(event_id);
+        }
+        store.tasks.remove(&child_id);
+        store.export_signatures.remove(&child_id);
+    }
+    store.decomposition_history.remove(record_index);
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "decompose_tests.rs"]
 mod tests;
