@@ -149,7 +149,6 @@ fn parse_clamps_zero_negative_and_preserves_independent_positive_minutes() {
     for invalid in [
         "bad",
         "{}",
-        r#"{"subtasks":[]}"#,
         r#"{"subtasks":[{"title":"Step","duration_minutes":1}]}"#,
     ] {
         assert!(parse_decompose_response(invalid).is_err());

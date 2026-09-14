@@ -23,6 +23,13 @@ pub fn build_decompose_prompt(task: &Task, history: &[CompletedExample]) -> Stri
     )
 }
 
+pub fn build_decompose_suggest_prompt(task: &Task, history: &[CompletedExample]) -> String {
+    format!(
+        "First judge whether this task is complex enough to warrant decomposition. If it is already a simple, actionable task, decline by returning ONLY {{\"subtasks\":[]}}. Do not invent unnecessary steps. Otherwise propose the ordered chain using these instructions:\n{}",
+        build_decompose_prompt(task, history)
+    )
+}
+
 fn normalize(proposal: &mut [SubTaskProposal]) -> Result<(), String> {
     if proposal.is_empty() {
         return Err("decomposition must contain at least one sub-task".into());
@@ -72,7 +79,11 @@ pub fn parse_decompose_response(text: &str) -> Result<Vec<SubTaskProposal>, Stri
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    normalize(&mut proposal)?;
+    // An empty list is a valid decline for batch suggestions. Commit paths
+    // separately require a nonempty proposal before review and after editing.
+    if !proposal.is_empty() {
+        normalize(&mut proposal)?;
+    }
     Ok(proposal)
 }
 
@@ -242,7 +253,8 @@ pub fn decompose_task<T: LlmTransport, R: DecompositionReviewer>(
         &parent,
         &ubu_core::recent_completed_examples(store, history_n),
     );
-    let proposal = parse_decompose_response(&transport.generate(&prompt)?)?;
+    let mut proposal = parse_decompose_response(&transport.generate(&prompt)?)?;
+    normalize(&mut proposal)?;
     let Some(mut final_proposal) = reviewer.review(&proposal) else {
         return Ok(None);
     };
