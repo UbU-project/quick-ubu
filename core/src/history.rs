@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::{ActualStatus, FactKind, LogEntryKind, Store, TaskStatus};
+use crate::{CompletionFact, Store, TaskStatus};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletedExample {
@@ -15,22 +15,12 @@ pub struct CompletedExample {
     pub completed_at: DateTime<Utc>,
 }
 
-/// The `limit` most-recently-completed tasks that HAVE at least one tag.
-pub fn recent_completed_examples(store: &Store, limit: usize) -> Vec<CompletedExample> {
-    if limit == 0 {
-        return Vec::new();
-    }
+/// Build tagged examples from the caller's bounded completion query.
+pub fn recent_completed_examples(store: &Store, facts: &[CompletionFact]) -> Vec<CompletedExample> {
     let mut completions = BTreeMap::new();
-    for entry in &store.log {
-        if let LogEntryKind::Fact(FactKind::Actual {
-            item_id,
-            status: ActualStatus::Done,
-            ..
-        }) = &entry.kind
-        {
-            let latest = completions.entry(*item_id).or_insert(entry.at);
-            *latest = (*latest).max(entry.at);
-        }
+    for fact in facts {
+        let latest = completions.entry(fact.item_id).or_insert(fact.at);
+        *latest = (*latest).max(fact.at);
     }
     let mut examples: Vec<_> = completions
         .into_iter()
@@ -50,6 +40,5 @@ pub fn recent_completed_examples(store: &Store, limit: usize) -> Vec<CompletedEx
         .collect();
     // Stable sorting preserves ascending task ID order for tied timestamps.
     examples.sort_by_key(|example| std::cmp::Reverse(example.completed_at));
-    examples.truncate(limit);
     examples
 }
