@@ -119,6 +119,7 @@ fn task_progress_is_visible_before_model_calls_with_operation_totals_and_chunk_r
                 2,
                 0,
                 5,
+                15,
                 &AtomicBool::new(false),
                 &mut |_| Ok(())
             ),
@@ -281,6 +282,7 @@ fn default_operations_enqueue_all_batches_and_save_once_per_chunk() {
             2,
             0,
             5,
+            u32::MAX,
             &AtomicBool::new(false),
             &mut |store| {
                 snapshots.push(store.clone());

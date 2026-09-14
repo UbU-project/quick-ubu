@@ -87,6 +87,74 @@ pub fn parse_decompose_response(text: &str) -> Result<Vec<SubTaskProposal>, Stri
     Ok(proposal)
 }
 
+/// One suggestion attempt per eligible task; never review or commit here.
+pub fn run_decompose_suggest_batch<T: LlmTransport>(
+    store: &mut Store,
+    transport: &T,
+    pass_cap: u32,
+    min_minutes: u32,
+    history_n: usize,
+    interrupted: &std::sync::atomic::AtomicBool,
+    save: &mut dyn FnMut(&Store) -> Result<(), String>,
+) -> crate::batch::BatchOutcome {
+    use crate::batch::{check_interrupt, log_model_tasks, save_progress, BatchOutcome};
+    let mut processed = 0;
+    let mut queued = 0;
+    let mut declined = 0;
+    let mut errors = 0;
+    let result = (|| -> Result<(), BatchOutcome> {
+        check_interrupt(store, interrupted, save)?;
+        let eligible: Vec<_> =
+            crate::logic::select_active_tasks(store, &crate::logic::TaskFilter::default())
+                .into_iter()
+                .filter(|id| {
+                    store.tasks[id].est_duration >= Duration::minutes(i64::from(min_minutes))
+                        && store
+                            .batch_passes
+                            .get(&format!("{id}|decompose"))
+                            .copied()
+                            .unwrap_or(0)
+                            < pass_cap
+                        && !store.pending_decompositions.contains_key(id)
+                })
+                .collect();
+        for (index, id) in eligible.iter().enumerate() {
+            check_interrupt(store, interrupted, save)?;
+            let prompt = build_decompose_suggest_prompt(
+                &store.tasks[id],
+                &ubu_core::recent_completed_examples(store, history_n),
+            );
+            log_model_tasks(store, "decompose", &[*id], index, eligible.len())?;
+            match transport
+                .generate(&prompt)
+                .and_then(|text| parse_decompose_response(&text))
+            {
+                Ok(proposal) if proposal.is_empty() => declined += 1,
+                Ok(proposal) => {
+                    store.pending_decompositions.insert(*id, proposal);
+                    queued += 1;
+                }
+                Err(error) => {
+                    errors += 1;
+                    eprintln!("batch decompose {id} failed: {error}; pass counted, continuing");
+                }
+            }
+            *store
+                .batch_passes
+                .entry(format!("{id}|decompose"))
+                .or_default() += 1;
+            processed += 1;
+            save_progress(store, save)?;
+        }
+        check_interrupt(store, interrupted, save)
+    })();
+    println!("batch decompose: tasks processed {processed}, suggestions queued {queued}, declined {declined}, errors {errors}");
+    match result {
+        Ok(()) => BatchOutcome::Completed,
+        Err(outcome) => outcome,
+    }
+}
+
 pub trait DecompositionReviewer {
     fn review(&mut self, proposal: &[SubTaskProposal]) -> Option<Vec<SubTaskProposal>>;
 }

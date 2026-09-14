@@ -213,16 +213,16 @@ pub fn run_batch_operations<T: LlmTransport>(
     batch_size: usize,
     history_n: usize,
     round_cap: u32,
+    min_minutes: u32,
     interrupted: &AtomicBool,
     save: &mut dyn FnMut(&Store) -> Result<(), String>,
 ) -> BatchOutcome {
     if batch_size == 0 {
         return BatchOutcome::Failed("batch size must be greater than zero".into());
     }
-    if let Some(name) = ops
-        .iter()
-        .find(|name| **name != "clarify" && !OPERATIONS.iter().any(|op| op.name == **name))
-    {
+    if let Some(name) = ops.iter().find(|name| {
+        !matches!(**name, "clarify" | "decompose") && !OPERATIONS.iter().any(|op| op.name == **name)
+    }) {
         return BatchOutcome::Failed(format!("unknown batch operation: {name}"));
     }
     for op in ops {
@@ -231,6 +231,16 @@ pub fn run_batch_operations<T: LlmTransport>(
                 store,
                 transport,
                 round_cap,
+                history_n,
+                interrupted,
+                save,
+            )
+        } else if *op == "decompose" {
+            crate::decompose::run_decompose_suggest_batch(
+                store,
+                transport,
+                pass_cap,
+                min_minutes,
                 history_n,
                 interrupted,
                 save,

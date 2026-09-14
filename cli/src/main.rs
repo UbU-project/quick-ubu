@@ -159,6 +159,9 @@ enum Command {
         round_cap: u32,
         #[arg(long, default_value = "25")]
         batch_size: std::num::NonZeroUsize,
+        /// Minimum task duration eligible for decomposition suggestions.
+        #[arg(long, default_value_t = 15)]
+        min_minutes: u32,
         #[arg(long, default_value_t = 20)]
         history: usize,
         #[arg(long)]
@@ -368,14 +371,16 @@ enum BatchOperation {
     Tags,
     Advise,
     Clarify,
+    Decompose,
 }
 
 fn batch_operations(only: Option<BatchOperation>) -> &'static [&'static str] {
     match only {
-        None => &["clarify", "tags", "advise"],
+        None => &["tags", "advise", "clarify", "decompose"],
         Some(BatchOperation::Tags) => &["tags"],
         Some(BatchOperation::Advise) => &["advise"],
         Some(BatchOperation::Clarify) => &["clarify"],
+        Some(BatchOperation::Decompose) => &["decompose"],
     }
 }
 
@@ -672,6 +677,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
             pass_cap,
             round_cap,
             batch_size,
+            min_minutes,
             history,
             model,
             ollama_url,
@@ -694,6 +700,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 batch_size.get(),
                 history,
                 round_cap,
+                min_minutes,
                 &interrupted,
                 &mut |store| backend.save(store),
             );
