@@ -302,6 +302,7 @@ pub fn decompose_task<T: LlmTransport, R: DecompositionReviewer>(
         id: Id::new_v4(),
         parent,
         child_ids: child_ids.clone(),
+        rewires: vec![],
         at: now,
     });
     if let Some(event_id) = next.calendar_links.remove(&task_id) {

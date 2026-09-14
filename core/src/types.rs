@@ -32,10 +32,24 @@ pub struct ClarifyState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RewireKind {
+    BlockedBy,
+    After(chrono::Duration),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Rewire {
+    pub task_id: Id,
+    pub kind: RewireKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecompositionRecord {
     pub id: Id,
     pub parent: Task,
     pub child_ids: Vec<Id>,
+    #[serde(default)]
+    pub rewires: Vec<Rewire>,
     pub at: chrono::DateTime<chrono::Utc>,
 }
 

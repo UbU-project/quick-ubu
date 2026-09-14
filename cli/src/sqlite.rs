@@ -440,7 +440,7 @@ mod tests {
         );
         store.decomposition_history.push(ubu_core::DecompositionRecord {
             id: id(70), parent: store.tasks[&id(2)].clone(),
-            child_ids: vec![id(72), id(71)], at,
+            child_ids: vec![id(72), id(71)], rewires: vec![], at,
         });
         store.pending_event_deletions = vec!["retired-'雪'".into(), "older-event".into()];
         // The first two entries share a timestamp; their insertion order is meaningful.

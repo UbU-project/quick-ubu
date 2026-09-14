@@ -545,6 +545,7 @@ fn undo_selection_uses_last_record_and_retired_parent_id_or_title_prefixes() {
             id: Id::new_v4(),
             parent,
             child_ids: vec![],
+            rewires: vec![],
             at: timestamp,
         });
     }

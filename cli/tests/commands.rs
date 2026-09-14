@@ -59,6 +59,7 @@ fn undo_command_fixture(path: &Path) -> Store {
                 id: Uuid::from_u128(n + 100),
                 parent,
                 child_ids: vec![child.id],
+                rewires: vec![],
                 at: chrono::DateTime::from_timestamp(1_800_000_000 - n as i64, 0).unwrap(),
             });
     }
