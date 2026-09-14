@@ -23,6 +23,15 @@ pub trait StorageBackend {
     fn recent_completions(&self, limit: usize) -> Result<Vec<CompletionFact>, String>;
 }
 
+fn completion_fact(entry: &LogEntry) -> Option<CompletionFact> {
+    match &entry.kind {
+        ubu_core::LogEntryKind::Fact(ubu_core::FactKind::Actual {
+            item_id, status: ubu_core::ActualStatus::Done, actual,
+        }) => Some(CompletionFact { item_id: *item_id, at: entry.at, actual: actual.clone() }),
+        _ => None,
+    }
+}
+
 /// Retained JSON backend for compatibility tests and callers of the storage trait.
 #[allow(dead_code)]
 pub struct JsonBackend {

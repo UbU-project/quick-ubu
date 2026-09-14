@@ -1,11 +1,12 @@
 use std::fs;
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde_json::{Map, Value};
-use ubu_core::Store;
+use ubu_core::{CompletionFact, LogEntry, Store};
 
-use super::StorageBackend;
+use super::{completion_fact, StorageBackend};
 
 pub struct SqliteBackend {
     connection: Connection,
@@ -33,8 +34,10 @@ impl SqliteBackend {
     fn initialize(connection: Connection) -> Result<Self, String> {
         connection.execute_batch(
             "BEGIN;
-             CREATE TABLE IF NOT EXISTS log (id TEXT PRIMARY KEY, at INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS log (id TEXT PRIMARY KEY, at INTEGER NOT NULL, data TEXT NOT NULL,
+                 item_id TEXT, is_completion INTEGER NOT NULL DEFAULT 0);
              CREATE INDEX IF NOT EXISTS log_at ON log(at);
+             CREATE INDEX IF NOT EXISTS idx_log_completion ON log(is_completion, at);
              CREATE TABLE IF NOT EXISTS objectives (id TEXT PRIMARY KEY, data TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS routines (id TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -213,21 +216,60 @@ impl StorageBackend for SqliteBackend {
             }),
         )?;
 
-        {
-            let mut insert = tx
-                .prepare("INSERT OR IGNORE INTO log (id, at, data) VALUES (?1, ?2, ?3)")
-                .map_err(|error| format!("failed to prepare SQLite log append: {error}"))?;
-            for entry in &store.log {
-                let data = serde_json::to_string(entry)
-                    .map_err(|error| format!("failed to serialize log: {error}"))?;
-                insert
-                    .execute(params![entry.id.to_string(), entry.at.timestamp(), data])
-                    .map_err(|error| format!("failed to append SQLite log: {error}"))?;
-            }
-        }
+        append_log_rows(&tx, &store.log)?;
         tx.commit()
             .map_err(|error| format!("failed to commit SQLite save: {error}"))
     }
+
+    fn append_log(&self, entries: &[LogEntry]) -> Result<(), String> {
+        let tx = self.connection.unchecked_transaction()
+            .map_err(|error| format!("failed to begin SQLite log append: {error}"))?;
+        append_log_rows(&tx, entries)?;
+        tx.commit().map_err(|error| format!("failed to commit SQLite log append: {error}"))
+    }
+
+    fn completions_in_window(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CompletionFact>, String> {
+        if from >= to { return Ok(vec![]); }
+        // The existing index stores seconds. Widen the upper bound when needed,
+        // then enforce exact subsecond boundaries using the retained JSON timestamp.
+        let end = to.timestamp() + i64::from(to.timestamp_subsec_nanos() != 0);
+        let completions = read_completions(&self.connection,
+            "SELECT data FROM log WHERE is_completion = 1 AND at >= ?1 AND at < ?2 ORDER BY at, rowid",
+            params![from.timestamp(), end])?;
+        Ok(completions.into_iter().filter(|fact| from <= fact.at && fact.at < to).collect())
+    }
+
+    fn recent_completions(&self, limit: usize) -> Result<Vec<CompletionFact>, String> {
+        read_completions(&self.connection,
+            "SELECT data FROM log WHERE is_completion = 1 ORDER BY at DESC, rowid DESC LIMIT ?1",
+            [i64::try_from(limit).unwrap_or(i64::MAX)])
+    }
+}
+
+fn append_log_rows(connection: &Connection, entries: &[LogEntry]) -> Result<(), String> {
+    let mut insert = connection.prepare(
+        "INSERT OR IGNORE INTO log (id, at, data, item_id, is_completion) VALUES (?1, ?2, ?3, ?4, ?5)"
+    ).map_err(|error| format!("failed to prepare SQLite log append: {error}"))?;
+    for entry in entries {
+        let data = serde_json::to_string(entry).map_err(|error| format!("failed to serialize log: {error}"))?;
+        let item_id = completion_fact(entry).map(|fact| fact.item_id.to_string());
+        insert.execute(params![entry.id.to_string(), entry.at.timestamp(), data, item_id, i64::from(item_id.is_some())])
+            .map_err(|error| format!("failed to append SQLite log: {error}"))?;
+    }
+    Ok(())
+}
+
+fn read_completions(connection: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<Vec<CompletionFact>, String> {
+    let mut statement = connection.prepare(sql).map_err(|error| format!("failed to prepare SQLite completion query: {error}"))?;
+    let rows = statement.query_map(params, |row| row.get::<_, String>(0))
+        .map_err(|error| format!("failed to query SQLite completions: {error}"))?;
+    let mut completions = Vec::new();
+    for row in rows {
+        let data = row.map_err(|error| format!("failed to read SQLite completion: {error}"))?;
+        let entry: LogEntry = serde_json::from_str(&data).map_err(|error| format!("invalid SQLite completion log entry: {error}"))?;
+        if let Some(fact) = completion_fact(&entry) { completions.push(fact); }
+    }
+    Ok(completions)
 }
 
 // Identifiers here are internal constants, never user input.
