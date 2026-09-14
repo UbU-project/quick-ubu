@@ -5,16 +5,8 @@ use ollama_planner::LlmTransport;
 use serde_json::{json, Value};
 use ubu_core::{
     AfterConstraint, CompletedExample, DecompositionRecord, Id, Provenance, Rewire, RewireKind,
-    Store, Task, TaskStatus,
+    Store, SubTaskProposal, Task, TaskStatus,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubTaskProposal {
-    pub title: String,
-    pub duration_minutes: i64,
-    pub offset_minutes: i64,
-    pub clamped: bool,
-}
 
 pub fn build_decompose_prompt(task: &Task, history: &[CompletedExample]) -> String {
     let history: Vec<_> = history.iter().map(|example| json!({

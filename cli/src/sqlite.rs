@@ -117,6 +117,7 @@ impl StorageBackend for SqliteBackend {
                 "batch_passes" => singleton!(batch_passes),
                 "clarify_sessions" => singleton!(clarify_sessions),
                 "decomposition_history" => singleton!(decomposition_history),
+                "pending_decompositions" => singleton!(pending_decompositions),
                 "pending_event_deletions" => singleton!(pending_event_deletions),
                 _ => {}
             }
@@ -202,6 +203,7 @@ impl StorageBackend for SqliteBackend {
                 ("batch_passes", serde_json::to_string(&store.batch_passes)),
                 ("clarify_sessions", serde_json::to_string(&store.clarify_sessions)),
                 ("decomposition_history", serde_json::to_string(&store.decomposition_history)),
+                ("pending_decompositions", serde_json::to_string(&store.pending_decompositions)),
                 ("pending_event_deletions", serde_json::to_string(&store.pending_event_deletions)),
             ]
             .into_iter()

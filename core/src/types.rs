@@ -31,6 +31,14 @@ pub struct ClarifyState {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubTaskProposal {
+    pub title: String,
+    pub duration_minutes: i64,
+    pub offset_minutes: i64,
+    pub clamped: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RewireKind {
     BlockedBy,
