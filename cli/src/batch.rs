@@ -78,6 +78,38 @@ pub(crate) fn check_interrupt(
     Ok(())
 }
 
+/// Print and flush before the blocking model call so progress is visible immediately.
+pub(crate) fn log_model_tasks(
+    store: &Store,
+    op: &str,
+    ids: &[Id],
+    offset: usize,
+    total: usize,
+) -> Result<(), BatchOutcome> {
+    use std::io::Write;
+
+    if ids.len() > 1 {
+        println!(
+            "batch {op}: Ollama processing tasks {}-{}/{total} together",
+            offset + 1,
+            offset + ids.len()
+        );
+    }
+    for (index, id) in ids.iter().enumerate() {
+        if let Some(task) = store.tasks.get(id) {
+            println!(
+                "batch {op}: Ollama processing task {}/{total}: {} ({id})",
+                offset + index + 1,
+                task.title
+            );
+            println!("  detail: {}", task.detail.as_deref().unwrap_or("(none)"));
+        }
+    }
+    std::io::stdout()
+        .flush()
+        .map_err(|error| BatchOutcome::Failed(format!("failed to flush batch progress: {error}")))
+}
+
 /// Make one pass per requested operation, up to each task's persisted pass cap.
 /// Handled model errors count as attempts; storage/setup errors are fatal.
 pub fn run_batch<T: LlmTransport>(
@@ -128,6 +160,7 @@ pub fn run_batch<T: LlmTransport>(
                 check_interrupt(store, interrupted, save)?;
                 let history = recent_completed_examples(store, history_n);
                 let (prompt, ids) = (op.prompt_builder)(store, chunk, &history);
+                log_model_tasks(store, op.name, &ids, summary.tasks, eligible.len())?;
                 match transport
                     .generate(&prompt)
                     .and_then(|text| (op.parser)(&text, &ids))

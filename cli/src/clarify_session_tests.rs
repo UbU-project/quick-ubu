@@ -31,6 +31,172 @@ fn context(prompt: &str) -> Value {
 }
 
 #[test]
+fn auto_queue_selects_open_dynamic_blank_tasks_and_preserves_existing_sessions() {
+    let mut store = ready_store(&[2, 3, 5]);
+    for task in store.tasks.values_mut() {
+        task.detail = None;
+    }
+    store
+        .clarify_sessions
+        .get_mut(&Id::from_u128(1))
+        .unwrap()
+        .accumulated = "Saved Q&A".into();
+    store
+        .clarify_sessions
+        .get_mut(&Id::from_u128(2))
+        .unwrap()
+        .pending = parsed_questions();
+    let existing = store.clarify_sessions.clone();
+    for (index, (detail, status, pinned)) in [
+        (None, TaskStatus::Backlog, false),
+        (Some(""), TaskStatus::Scheduled, false),
+        (Some(" \t\n"), TaskStatus::Backlog, false),
+        (Some("Useful detail"), TaskStatus::Backlog, false),
+        (None, TaskStatus::Done, false),
+        (None, TaskStatus::Deferred, false),
+        (None, TaskStatus::Active, false),
+        (None, TaskStatus::Scheduled, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut task = task();
+        task.id = Id::from_u128(index as u128 + 4);
+        task.title = format!("Task {}", index + 4);
+        task.detail = detail.map(str::to_owned);
+        task.status = status;
+        if pinned {
+            let start = Utc.with_ymd_and_hms(2026, 9, 13, 9, 0, 0).unwrap();
+            task.pinned = Some(ubu_core::TimeWindow {
+                start,
+                end: start + Duration::hours(1),
+            });
+        }
+        store.upsert_task(task);
+    }
+    let tasks_before = store.tasks.clone();
+    let backend = SqliteBackend::in_memory().unwrap();
+    // Even a zero-round run persists the newly discovered queue without generation.
+    assert_eq!(
+        run_clarify_batch(
+            &mut store,
+            &StubTransport::new(vec![]),
+            0,
+            0,
+            &AtomicBool::new(false),
+            &mut |s| backend.save(s)
+        ),
+        BatchOutcome::Completed
+    );
+    store = backend.load().unwrap();
+    assert_eq!(store.tasks, tasks_before);
+    assert_eq!(store.clarify_sessions.len(), 6);
+    for (id, session) in existing {
+        assert_eq!(store.clarify_sessions[&id], session);
+    }
+    for n in 4..=6 {
+        let session = &store.clarify_sessions[&Id::from_u128(n)];
+        assert_eq!(session.round, 0);
+        assert!(session.pending.is_empty());
+        assert!(session.tags.is_empty());
+        assert_eq!(
+            session.accumulated,
+            tasks_before[&Id::from_u128(n)]
+                .detail
+                .clone()
+                .unwrap_or_default()
+        );
+    }
+    let transport = StubTransport::new(vec![questions_reply(); 4]);
+    assert_eq!(
+        run_clarify_batch(
+            &mut store,
+            &transport,
+            5,
+            0,
+            &AtomicBool::new(false),
+            &mut |s| backend.save(s)
+        ),
+        BatchOutcome::Completed
+    );
+    assert_eq!(
+        transport
+            .prompts
+            .borrow()
+            .iter()
+            .map(|p| context(p)["task"]["title"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["Task 1", "Task 4", "Task 5", "Task 6"]
+    );
+    assert_eq!(
+        context(&transport.prompts.borrow()[0])["accumulated_lore_and_qa"],
+        "Saved Q&A"
+    );
+    let after = store.clone();
+    // Repeated runs neither reset waiting/capped sessions nor generate new questions.
+    assert_eq!(
+        run_clarify_batch(
+            &mut store,
+            &StubTransport::new(vec![]),
+            5,
+            0,
+            &AtomicBool::new(false),
+            &mut |_| panic!("nothing changed")
+        ),
+        BatchOutcome::Completed
+    );
+    assert_eq!(store, after);
+}
+
+#[test]
+fn auto_queue_is_saved_before_generation_and_honors_interrupts_and_save_errors() {
+    let mut initial = Store::new();
+    let mut task = task();
+    task.detail = None;
+    initial.upsert_task(task);
+    let transport = StubTransport::new(vec![]);
+    let mut store = initial.clone();
+    assert_eq!(
+        run_clarify_batch(
+            &mut store,
+            &transport,
+            5,
+            0,
+            &AtomicBool::new(true),
+            &mut |_| Ok(())
+        ),
+        BatchOutcome::Interrupted
+    );
+    assert_eq!(store, initial);
+    let flag = AtomicBool::new(false);
+    let backend = SqliteBackend::in_memory().unwrap();
+    assert_eq!(
+        run_clarify_batch(&mut store, &transport, 5, 0, &flag, &mut |s| {
+            backend.save(s)?;
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        }),
+        BatchOutcome::Interrupted
+    );
+    assert_eq!(backend.load().unwrap(), store);
+    assert_eq!(store.clarify_sessions.len(), 1);
+    assert_eq!(store.clarify_sessions[&Id::from_u128(1)].round, 0);
+    let mut store = initial;
+    assert!(matches!(
+        run_clarify_batch(
+            &mut store,
+            &transport,
+            5,
+            0,
+            &AtomicBool::new(false),
+            &mut |_| Err("disk full".into())
+        ),
+        BatchOutcome::Failed(_)
+    ));
+    assert!(transport.prompts.borrow().is_empty());
+}
+
+#[test]
 fn queued_lifecycle_survives_reload_between_generation_answers_and_finalization() {
     let mut store = ready_store(&[0]);
     let id = Id::from_u128(1);
@@ -492,17 +658,20 @@ fn queued_session_is_not_overwritten_and_orphan_is_preserved_without_model_call(
 }
 
 #[test]
-fn default_dispatch_includes_clarify_and_only_clarify_does_not_run_classifiers() {
+fn default_dispatch_finishes_ready_clarifications_before_tags_then_advice() {
     for only in [None, Some(crate::BatchOperation::Clarify)] {
-        let mut store = ready_store(&[0]);
+        let mut store = ready_store(&[0, 2, 1]);
+        let waiting = Id::from_u128(3);
+        store.clarify_sessions.get_mut(&waiting).unwrap().pending = parsed_questions();
+        let waiting_before = store.clarify_sessions[&waiting].clone();
         let default = only.is_none();
-        let mut replies = vec![];
+        let mut replies = vec![response(vec![], &[], true), questions_reply()];
         if default {
             replies.push(Ok(r#"{"tags":[]}"#.into()));
             replies.push(Ok(r#"{"dependencies":[],"preferences":[]}"#.into()));
         }
-        replies.push(questions_reply());
         let transport = StubTransport::new(replies);
+        let mut snapshots = vec![];
         assert_eq!(
             run_batch_operations(
                 &mut store,
@@ -513,16 +682,36 @@ fn default_dispatch_includes_clarify_and_only_clarify_does_not_run_classifiers()
                 0,
                 5,
                 &AtomicBool::new(false),
-                &mut |_| Ok(())
+                &mut |store| {
+                    snapshots.push(store.clone());
+                    Ok(())
+                }
             ),
             BatchOutcome::Completed
         );
         assert_eq!(
             transport.prompts.borrow().len(),
-            if default { 3 } else { 1 }
+            if default { 4 } else { 2 }
         );
-        assert_eq!(store.batch_passes.len(), if default { 2 } else { 0 });
+        let prompts = transport.prompts.borrow();
+        assert_eq!(context(&prompts[0])["task"]["title"], "Task 2");
+        assert_eq!(context(&prompts[1])["task"]["title"], "Task 1");
+        assert!(!snapshots[0].clarify_sessions.contains_key(&Id::from_u128(2)));
+        assert!(snapshots[1]
+            .clarify_sessions
+            .values()
+            .all(|s| !s.pending.is_empty()));
+        assert!(snapshots[1].batch_passes.is_empty());
+        if default {
+            assert_eq!(snapshots[2].batch_passes.len(), 3);
+            assert!(snapshots[2]
+                .batch_passes
+                .keys()
+                .all(|key| key.ends_with("|tags")));
+        }
+        assert_eq!(store.batch_passes.len(), if default { 6 } else { 0 });
         assert_eq!(store.clarify_sessions[&Id::from_u128(1)].round, 1);
+        assert_eq!(store.clarify_sessions[&waiting], waiting_before);
     }
 }
 

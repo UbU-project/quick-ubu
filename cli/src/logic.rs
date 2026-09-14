@@ -3771,9 +3771,9 @@ mod tests {
         let mut preference_store = graph_store();
         preference_store
             .pending_decisions
-            .push(preference_decision(id(900), a, b));
+            .push(preference_decision(id(1200), a, b));
         let preference_before = preference_store.clone();
-        assert!(resolve_decision(&mut preference_store, id(900), Answer::Confirm).is_err());
+        assert!(resolve_decision(&mut preference_store, id(1200), Answer::Confirm).is_err());
         assert_eq!(preference_store, preference_before);
 
         let mut dependency_store = graph_store();

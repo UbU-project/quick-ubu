@@ -407,7 +407,7 @@ mod tests {
             async { Ok(stream) },
             "test-model",
             Duration::from_secs(300),
-            Duration::from_secs(900),
+            Duration::from_secs(1200),
         )
         .await
     }
@@ -494,7 +494,7 @@ mod tests {
             open,
             "test-model",
             Duration::from_secs(300),
-            Duration::from_secs(900),
+            Duration::from_secs(1200),
         )
         .await
         .unwrap_err();
@@ -508,7 +508,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn deadlines_apply_while_waiting_for_http_headers() {
         for (first, total, expected, elapsed) in [
-            (300, 900, "first-response timeout", 300),
+            (300, 1200, "first-response timeout", 300),
             (300, 200, "total execution timeout", 200),
         ] {
             let start = tokio::time::Instant::now();
@@ -552,10 +552,10 @@ mod tests {
             let dropped = stream.dropped.clone();
             let error = stream_answer(stream).await.unwrap_err();
             assert!(
-                error.contains("total execution timeout after 900s; partial answer discarded"),
+                error.contains("total execution timeout after 1200s; partial answer discarded"),
                 "{error}"
             );
-            assert_eq!(start.elapsed(), Duration::from_secs(900));
+            assert_eq!(start.elapsed(), Duration::from_secs(1200));
             assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
         }
     }
@@ -577,7 +577,7 @@ mod tests {
             base_url: "http://unused.invalid".into(),
             model: "test-model".into(),
             timeout_secs: 300,
-            total_timeout_secs: 900,
+            total_timeout_secs: 1200,
         };
         let body = transport.request_body("Return only JSON");
         assert_eq!(body["think"].as_bool(), Some(false));

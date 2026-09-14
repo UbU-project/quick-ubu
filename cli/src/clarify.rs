@@ -3,23 +3,26 @@
 use std::collections::BTreeMap;
 use ubu_core::{Question, QuestionKind};
 
+fn needs_clarification(task: &ubu_core::Task) -> bool {
+    matches!(
+        task.status,
+        ubu_core::TaskStatus::Backlog | ubu_core::TaskStatus::Scheduled
+    ) && task.pinned.is_none()
+        && task
+            .detail
+            .as_deref()
+            .map_or(true, |detail| detail.trim().is_empty())
+}
+
 /// Select a dynamic task by planned start, keeping all tasks in the plan so dependencies and
 /// occupied time still determine the interview order.
 pub fn next_task_to_clarify(
     store: &ubu_core::Store,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<ubu_core::Id>, String> {
-    use ubu_core::{re_plan, AffectBudget, ComputeTarget, DeterministicPlacer, TaskStatus};
+    use ubu_core::{re_plan, AffectBudget, ComputeTarget, DeterministicPlacer};
 
-    let needs_detail = |task: &ubu_core::Task| {
-        matches!(task.status, TaskStatus::Backlog | TaskStatus::Scheduled)
-            && task.pinned.is_none()
-            && task
-                .detail
-                .as_deref()
-                .map_or(true, |detail| detail.trim().is_empty())
-    };
-    if !store.tasks.values().any(needs_detail) {
+    if !store.tasks.values().any(needs_clarification) {
         return Ok(None);
     }
     let plan = re_plan(
@@ -36,7 +39,7 @@ pub fn next_task_to_clarify(
         .entries
         .iter()
         .filter(|entry| !entry.is_handle && entry.window.end > now)
-        .filter(|entry| store.tasks.get(&entry.item).is_some_and(needs_detail))
+        .filter(|entry| store.tasks.get(&entry.item).is_some_and(needs_clarification))
         .min_by_key(|entry| (entry.window.start, entry.item))
         .map(|entry| entry.item))
 }
@@ -501,7 +504,8 @@ fn generate_session_round<T: ollama_planner::LlmTransport>(
     }
 }
 
-/// Generate one round for each ready session, furthest-advanced first.
+/// Queue open dynamic tasks with blank detail, preserving existing sessions,
+/// then generate one round for each ready session, furthest-advanced first.
 /// Awaiting answers requires operator work, not another model call.
 pub fn run_clarify_batch<T: ollama_planner::LlmTransport>(
     store: &mut ubu_core::Store,
@@ -519,6 +523,21 @@ pub fn run_clarify_batch<T: ollama_planner::LlmTransport>(
     let mut errors = 0;
     let result = (|| -> Result<(), BatchOutcome> {
         check_interrupt(store, interrupted, save)?;
+        let unqueued: Vec<_> = store
+            .tasks
+            .iter()
+            .filter(|(id, task)| {
+                needs_clarification(task) && !store.clarify_sessions.contains_key(id)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        if !unqueued.is_empty() {
+            for id in unqueued {
+                queue_clarification(store, id).map_err(BatchOutcome::Failed)?;
+            }
+            // Persist the queue before model work, including when the cap is zero.
+            save_progress(store, save)?;
+        }
         let mut eligible: Vec<_> = store
             .clarify_sessions
             .iter()
@@ -526,8 +545,10 @@ pub fn run_clarify_batch<T: ollama_planner::LlmTransport>(
             .map(|(id, session)| (*id, session.round))
             .collect();
         eligible.sort_by_key(|(id, round)| (std::cmp::Reverse(*round), *id));
+        let total = eligible.len();
         for (task_id, _) in eligible {
             check_interrupt(store, interrupted, save)?;
+            crate::batch::log_model_tasks(store, "clarify", &[task_id], processed, total)?;
             processed += 1;
             match generate_session_round(store, task_id, transport, round_cap, history_n) {
                 Ok((finished, enqueued)) => {

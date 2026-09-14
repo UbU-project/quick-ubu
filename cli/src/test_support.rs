@@ -27,6 +27,9 @@ pub fn print(args: fmt::Arguments<'_>) {
 pub fn eprint(args: fmt::Arguments<'_>) {
     STATE.with(|state| state.borrow_mut().stderr.write_fmt(args).unwrap());
 }
+pub fn take_stdout() -> String {
+    STATE.with(|state| String::from_utf8(std::mem::take(&mut state.borrow_mut().stdout)).unwrap())
+}
 pub struct Stdin;
 pub fn stdin() -> Stdin {
     Stdin

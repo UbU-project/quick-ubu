@@ -153,7 +153,7 @@ enum Command {
         ollama_url: String,
         #[arg(long, default_value_t = 300)]
         ollama_timeout: u64,
-        #[arg(long, default_value_t = 900)]
+        #[arg(long, default_value_t = 1200)]
         ollama_total_timeout: u64,
     },
     SuggestTags {
@@ -199,7 +199,7 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         ollama_timeout: u64,
         /// Maximum seconds for the entire Ollama generation, including startup.
-        #[arg(long, default_value_t = 900)]
+        #[arg(long, default_value_t = 1200)]
         ollama_total_timeout: u64,
     },
     ObjectiveAdd(ObjectiveAddArgs),
@@ -272,7 +272,7 @@ struct ReplanArgs {
     #[arg(long, default_value_t = 300)]
     ollama_timeout: u64,
     /// Maximum seconds for the entire Ollama generation, including startup.
-    #[arg(long, default_value_t = 900)]
+    #[arg(long, default_value_t = 1200)]
     ollama_total_timeout: u64,
 }
 
@@ -358,7 +358,7 @@ enum BatchOperation {
 
 fn batch_operations(only: Option<BatchOperation>) -> &'static [&'static str] {
     match only {
-        None => &["tags", "advise", "clarify"],
+        None => &["clarify", "tags", "advise"],
         Some(BatchOperation::Tags) => &["tags"],
         Some(BatchOperation::Advise) => &["advise"],
         Some(BatchOperation::Clarify) => &["clarify"],
@@ -583,7 +583,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 base_url: "http://localhost:11434".into(),
                 model,
                 timeout_secs: 300,
-                total_timeout_secs: 900,
+                total_timeout_secs: 1200,
             };
             let history = ubu_core::recent_completed_examples(&store, history);
             let report = clarify::clarify_task(
@@ -667,7 +667,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 base_url: "http://localhost:11434".into(),
                 model: resolved_model.clone(),
                 timeout_secs: 300,
-                total_timeout_secs: 900,
+                total_timeout_secs: 1200,
             };
             let history = ubu_core::recent_completed_examples(&store, history);
             let filter = logic::TaskFilter {
@@ -1368,7 +1368,7 @@ mod tests {
                 assert_eq!(model, None);
                 assert_eq!(ollama_url, "http://localhost:11434");
                 assert_eq!(ollama_timeout, 300);
-                assert_eq!(ollama_total_timeout, 900);
+                assert_eq!(ollama_total_timeout, 1200);
             }
             _ => panic!("expected advise"),
         }
@@ -1408,7 +1408,7 @@ mod tests {
                 Command::Replan(args) => {
                     assert_eq!(args.model.as_deref(), model_args.get(1).copied());
                     assert_eq!(args.ollama_timeout, 300);
-                    assert_eq!(args.ollama_total_timeout, 900);
+                    assert_eq!(args.ollama_total_timeout, 1200);
                 }
                 _ => panic!("expected replan"),
             }

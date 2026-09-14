@@ -76,6 +76,85 @@ fn advice_reply() -> Result<String, String> {
     Ok(r#"{"dependencies":[{"blocked":2,"blocker":1}],"preferences":[]}"#.into())
 }
 
+#[test]
+fn task_progress_is_visible_before_model_calls_with_operation_totals_and_chunk_ranges() {
+    struct ProgressTransport {
+        stub: StubTransport,
+        output_at_calls: RefCell<Vec<String>>,
+    }
+    impl LlmTransport for ProgressTransport {
+        fn generate(&self, prompt: &str) -> Result<String, String> {
+            self.output_at_calls
+                .borrow_mut()
+                .push(crate::test_support::take_stdout());
+            self.stub.generate(prompt)
+        }
+    }
+    for op in ["clarify", "tags", "advise"] {
+        crate::test_support::take_stdout();
+        let mut store = store(4);
+        store.tasks.get_mut(&id(4)).unwrap().status = TaskStatus::Done;
+        store.tasks.get_mut(&id(1)).unwrap().detail = Some("First line\nSecond line".into());
+        let replies = if op == "clarify" {
+            for n in 1..=3 {
+                crate::clarify::queue_clarification(&mut store, id(n)).unwrap();
+            }
+            store.clarify_sessions.get_mut(&id(2)).unwrap().round = 2;
+            vec![Ok(r#"{"questions":[],"tags":[],"done":true}"#.into()); 3]
+        } else if op == "tags" {
+            vec![tag_reply(2), tag_reply(1)]
+        } else {
+            vec![Ok(r#"{"dependencies":[],"preferences":[]}"#.into()); 2]
+        };
+        let transport = ProgressTransport {
+            stub: StubTransport::new(replies),
+            output_at_calls: RefCell::new(vec![]),
+        };
+        assert_eq!(
+            run_batch_operations(
+                &mut store,
+                &transport,
+                &[op],
+                3,
+                2,
+                0,
+                5,
+                &AtomicBool::new(false),
+                &mut |_| Ok(())
+            ),
+            BatchOutcome::Completed
+        );
+        let output = transport.output_at_calls.borrow();
+        let groups = if op == "clarify" {
+            vec![vec![2], vec![1], vec![3]]
+        } else {
+            vec![vec![1, 2], vec![3]]
+        };
+        assert_eq!(output.len(), groups.len());
+        let mut position = 0;
+        for (text, group) in output.iter().zip(groups) {
+            for n in group {
+                position += 1;
+                assert!(text.contains(&format!(
+                    "batch {op}: Ollama processing task {position}/3: Task {n} ({})",
+                    id(n)
+                )));
+            }
+            assert!(!text.contains("Task 4"));
+        }
+        let combined = output.join("\n");
+        assert!(combined.contains("detail: First line\nSecond line"));
+        assert!(combined.contains("detail: (none)"));
+        if op != "clarify" {
+            assert!(output[0].contains(&format!(
+                "batch {op}: Ollama processing tasks 1-2/3 together"
+            )));
+            assert!(!output[0].contains("task 3/3"));
+            assert!(output[1].contains("task 3/3"));
+        }
+    }
+}
+
 fn rows(prompt: &str) -> Vec<Value> {
     prompt
         .lines()
@@ -183,6 +262,9 @@ fn repeated_runs_bound_generate_and_parse_failures_by_the_cap() {
 #[test]
 fn default_operations_enqueue_all_batches_and_save_once_per_chunk() {
     let mut store = store(3);
+    for task in store.tasks.values_mut() {
+        task.detail = Some("Already clarified".into());
+    }
     let transport = StubTransport::new(vec![
         tag_reply(2),
         tag_reply(1),

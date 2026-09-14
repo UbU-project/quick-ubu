@@ -1443,11 +1443,11 @@ fn batch_parses_defaults_only_and_connection_overrides() {
     else {
         panic!("expected batch");
     };
-    assert_eq!(crate::batch_operations(only), &["tags", "advise", "clarify"]);
+    assert_eq!(crate::batch_operations(only), &["clarify", "tags", "advise"]);
     assert_eq!((pass_cap, batch_size.get(), history), (3, 25, 20));
     assert!(model.is_none());
     assert_eq!(ollama_url, "http://localhost:11434");
-    assert_eq!((ollama_timeout, ollama_total_timeout), (300, 900));
+    assert_eq!((ollama_timeout, ollama_total_timeout), (300, 1200));
     for op in ["tags", "advise"] {
         let crate::Command::Batch {
             only,
@@ -1511,8 +1511,9 @@ fn batch_zero_cap_completes_with_per_op_summaries_without_signals_or_http() {
     ));
     assert_success(&quick_ubu(&path, &["set-model", "unused"]));
     let before: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    for only in [None, Some("tags"), Some("advise")] {
-        let mut args = vec!["batch", "--pass-cap", "0"];
+    for only in [None, Some("tags"), Some("advise"), Some("clarify")] {
+        crate::test_support::seed(&path, &before);
+        let mut args = vec!["batch", "--pass-cap", "0", "--round-cap", "0"];
         if let Some(op) = only {
             args.extend(["--only", op]);
         }
@@ -1529,9 +1530,14 @@ fn batch_zero_cap_completes_with_per_op_summaries_without_signals_or_http() {
             );
         }
         assert!(stdout.ends_with("batch completed\n"));
+        let mut expected = before.clone();
+        if only.is_none() || only == Some("clarify") {
+            let id = *expected.tasks.keys().next().unwrap();
+            crate::clarify::queue_clarification(&mut expected, id).unwrap();
+        }
         assert_eq!(
             serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
-            before
+            expected
         );
     }
     fs::remove_dir_all(directory).unwrap();
