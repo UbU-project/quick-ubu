@@ -5,15 +5,22 @@ use crate::test_support::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use ubu_core::{Id, Store};
+use chrono::{DateTime, Utc};
+use ubu_core::{CompletionFact, Id, LogEntry, Store};
 
 #[path = "sqlite.rs"]
 mod sqlite;
 pub use sqlite::SqliteBackend;
 
+// The new queried-log methods are additive; application callers move in QL-2.
+#[allow(dead_code)]
 pub trait StorageBackend {
     fn load(&self) -> Result<Store, String>;
     fn save(&self, store: &Store) -> Result<(), String>;
+    fn append_log(&self, entries: &[LogEntry]) -> Result<(), String>;
+    fn completions_in_window(&self, from: DateTime<Utc>, to: DateTime<Utc>)
+        -> Result<Vec<CompletionFact>, String>;
+    fn recent_completions(&self, limit: usize) -> Result<Vec<CompletionFact>, String>;
 }
 
 /// Retained JSON backend for compatibility tests and callers of the storage trait.

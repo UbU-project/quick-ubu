@@ -298,6 +298,15 @@ fn undo_decompose_saves_once_and_does_not_report_success_when_save_fails() {
         saves: std::cell::Cell<usize>,
     }
     impl StorageBackend for FailingSave {
+        fn append_log(&self, _: &[ubu_core::LogEntry]) -> Result<(), String> {
+            panic!("undo must still use load/save in QL-1")
+        }
+        fn completions_in_window(&self, _: chrono::DateTime<chrono::Utc>, _: chrono::DateTime<chrono::Utc>) -> Result<Vec<ubu_core::CompletionFact>, String> {
+            panic!("undo must still use Store.log in QL-1")
+        }
+        fn recent_completions(&self, _: usize) -> Result<Vec<ubu_core::CompletionFact>, String> {
+            panic!("undo must still use Store.log in QL-1")
+        }
         fn load(&self) -> Result<Store, String> {
             Ok(self.before.clone())
         }

@@ -409,6 +409,15 @@ mod tests {
         }
     }
     impl StorageBackend for Backend {
+        fn append_log(&self, _: &[ubu_core::LogEntry]) -> Result<(), String> {
+            panic!("watch must still use load/save in QL-1")
+        }
+        fn completions_in_window(&self, _: DateTime<Utc>, _: DateTime<Utc>) -> Result<Vec<ubu_core::CompletionFact>, String> {
+            panic!("watch must still use Store.log in QL-1")
+        }
+        fn recent_completions(&self, _: usize) -> Result<Vec<ubu_core::CompletionFact>, String> {
+            panic!("watch must still use Store.log in QL-1")
+        }
         fn load(&self) -> Result<Store, String> {
             self.sqlite.load()
         }
