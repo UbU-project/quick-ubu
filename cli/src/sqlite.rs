@@ -350,6 +350,10 @@ fn read_strings(connection: &Connection, query: &str) -> Result<Value, String> {
 }
 
 #[cfg(test)]
+#[path = "log_query_tests.rs"]
+mod log_query_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone, Utc};
