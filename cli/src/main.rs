@@ -381,7 +381,7 @@ enum BatchOperation {
 
 fn batch_operations(only: Option<BatchOperation>) -> &'static [&'static str] {
     match only {
-        None => &["tags", "advise", "clarify", "decompose"],
+        None => &["clarify", "tags", "advise", "decompose"],
         Some(BatchOperation::Tags) => &["tags"],
         Some(BatchOperation::Advise) => &["advise"],
         Some(BatchOperation::Clarify) => &["clarify"],

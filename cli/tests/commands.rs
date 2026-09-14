@@ -55,7 +55,7 @@ fn decomposition_suggestion_flags_parse_and_only_decompose_zero_cap_needs_no_net
         } else {
             assert_eq!(
                 crate::batch_operations(only),
-                &["tags", "advise", "clarify", "decompose"]
+                &["clarify", "tags", "advise", "decompose"]
             );
         }
     }
@@ -1807,7 +1807,7 @@ fn batch_parses_defaults_only_and_connection_overrides() {
     else {
         panic!("expected batch");
     };
-    assert_eq!(crate::batch_operations(only), &["tags", "advise", "clarify", "decompose"]);
+    assert_eq!(crate::batch_operations(only), &["clarify", "tags", "advise", "decompose"]);
     assert_eq!((pass_cap, batch_size.get(), history), (3, 25, 20));
     assert!(model.is_none());
     assert_eq!(ollama_url, "http://localhost:11434");

@@ -278,7 +278,7 @@ fn initial_and_final_interrupts_and_save_failure_stop_generation() {
 }
 
 #[test]
-fn default_batch_orders_tags_advise_clarify_decompose_and_only_decompose_is_isolated() {
+fn default_batch_orders_clarify_tags_advise_decompose_and_only_decompose_is_isolated() {
     for only in [None, Some(crate::BatchOperation::Decompose)] {
         let mut store = active_store(1);
         crate::clarify::queue_clarification(&mut store, id(1)).unwrap();
@@ -287,9 +287,9 @@ fn default_batch_orders_tags_advise_clarify_decompose_and_only_decompose_is_isol
         let mut replies = vec![];
         if default {
             replies.extend([
+                Ok(r#"{"questions":[],"tags":[],"done":true}"#.into()),
                 Ok(r#"{"tags":[]}"#.into()),
                 Ok(r#"{"dependencies":[],"preferences":[]}"#.into()),
-                Ok(r#"{"questions":[],"tags":[],"done":true}"#.into()),
             ]);
         }
         replies.push(propose());
@@ -324,14 +324,15 @@ fn default_batch_orders_tags_advise_clarify_decompose_and_only_decompose_is_isol
         assert_eq!(store.tasks, original);
         assert!(store.decomposition_history.is_empty());
         if default {
+            assert!(snapshots[0].clarify_sessions.is_empty());
+            assert!(snapshots[0].batch_passes.is_empty());
             assert_eq!(
-                snapshots[0].batch_passes.keys().collect::<Vec<_>>(),
+                snapshots[1].batch_passes.keys().collect::<Vec<_>>(),
                 vec![&format!("{}|tags", id(1))]
             );
-            assert!(snapshots[1]
+            assert!(snapshots[2]
                 .batch_passes
                 .contains_key(&format!("{}|advise", id(1))));
-            assert!(snapshots[2].clarify_sessions.is_empty());
             assert!(snapshots[..3]
                 .iter()
                 .all(|s| s.pending_decompositions.is_empty()));
