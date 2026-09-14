@@ -31,6 +31,14 @@ pub struct ClarifyState {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecompositionRecord {
+    pub id: Id,
+    pub parent: Task,
+    pub child_ids: Vec<Id>,
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Stable identity for every stored entity.
 pub type Id = uuid::Uuid;
 

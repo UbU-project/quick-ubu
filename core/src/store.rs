@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::decision::{DecisionRecord, PendingDecision};
 use crate::routine::RoutineTemplate;
-use crate::types::{Bundle, ClarifyState, CoreError, Id, LogEntry, Objective, Preference, Task};
+use crate::types::{Bundle, ClarifyState, CoreError, DecompositionRecord, Id, LogEntry, Objective, Preference, Task};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Store {
@@ -40,6 +40,10 @@ pub struct Store {
     pub batch_passes: BTreeMap<String, u32>,
     #[serde(default)]
     pub clarify_sessions: BTreeMap<Id, ClarifyState>,
+    #[serde(default)]
+    pub decomposition_history: Vec<DecompositionRecord>,
+    #[serde(default)]
+    pub pending_event_deletions: Vec<String>,
     /// append-only SessionLog
     pub log: Vec<LogEntry>,
 }
