@@ -46,6 +46,48 @@ impl StorageBackend for JsonBackend {
     fn save(&self, store: &Store) -> Result<(), String> {
         save(&self.path, store)
     }
+
+    fn append_log(&self, entries: &[LogEntry]) -> Result<(), String> {
+        let mut store = self.load()?;
+        let mut ids: std::collections::BTreeSet<_> = store.log.iter().map(|entry| entry.id).collect();
+        for entry in entries {
+            if ids.insert(entry.id) {
+                store.log.push(entry.clone());
+            }
+        }
+        self.save(&store)
+    }
+
+    fn completions_in_window(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<CompletionFact>, String> {
+        Ok(json_completions(self.load()?)
+            .into_iter()
+            .filter(|fact| from <= fact.at && fact.at < to)
+            .collect())
+    }
+
+    fn recent_completions(&self, limit: usize) -> Result<Vec<CompletionFact>, String> {
+        Ok(json_completions(self.load()?)
+            .into_iter()
+            .rev()
+            .take(limit)
+            .collect())
+    }
+}
+
+fn json_completions(store: Store) -> Vec<CompletionFact> {
+    // Match SQLite's first-write-wins IDs, including duplicate IDs in legacy JSON.
+    let mut ids = std::collections::BTreeSet::new();
+    let mut completions: Vec<_> = store.log.iter()
+        .filter(|entry| ids.insert(entry.id))
+        .filter_map(completion_fact)
+        .collect();
+    // SQLite retains whole-second timestamps and uses insertion order for ties.
+    completions.sort_by_key(|fact| fact.at.timestamp());
+    completions
 }
 
 #[allow(dead_code)]
