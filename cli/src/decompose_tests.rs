@@ -3,6 +3,9 @@ use crate::persist::{SqliteBackend, StorageBackend};
 use std::cell::RefCell;
 use ubu_core::{Commitment, DeferPolicy, Tier, TimeWindow};
 
+#[path = "decompose_rewire_tests.rs"]
+mod rewiring;
+
 fn at() -> DateTime<Utc> {
     DateTime::from_timestamp(1_800_000_000, 123).unwrap()
 }

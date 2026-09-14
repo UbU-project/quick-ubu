@@ -440,7 +440,11 @@ mod tests {
         );
         store.decomposition_history.push(ubu_core::DecompositionRecord {
             id: id(70), parent: store.tasks[&id(2)].clone(),
-            child_ids: vec![id(72), id(71)], rewires: vec![], at,
+            child_ids: vec![id(72), id(71)],
+            rewires: vec![
+                ubu_core::Rewire { task_id: id(5), kind: ubu_core::RewireKind::BlockedBy },
+                ubu_core::Rewire { task_id: id(6), kind: ubu_core::RewireKind::After(Duration::minutes(-5)) },
+            ], at,
         });
         store.pending_event_deletions = vec!["retired-'雪'".into(), "older-event".into()];
         // The first two entries share a timestamp; their insertion order is meaningful.
@@ -454,6 +458,32 @@ mod tests {
             });
         }
         store
+    }
+
+    #[test]
+    fn legacy_sqlite_decomposition_without_rewires_loads_and_undoes() {
+        let backend = SqliteBackend::in_memory().unwrap();
+        let store = populated_store();
+        backend.save(&store).unwrap();
+        let mut history = serde_json::to_value(&store.decomposition_history).unwrap();
+        history[0].as_object_mut().unwrap().remove("rewires");
+        backend
+            .connection
+            .execute(
+                "UPDATE singletons SET data = ?1 WHERE key = 'decomposition_history'",
+                [history.to_string()],
+            )
+            .unwrap();
+        let mut loaded = backend.load().unwrap();
+        assert!(loaded.decomposition_history[0].rewires.is_empty());
+        crate::decompose::undo_decomposition(&mut loaded, 0).unwrap();
+        backend.save(&loaded).unwrap();
+        assert_eq!(backend.load().unwrap(), loaded);
+        assert_eq!(
+            loaded.tasks[&store.decomposition_history[0].parent.id],
+            store.decomposition_history[0].parent
+        );
+        assert!(loaded.decomposition_history.is_empty());
     }
 
     #[test]
