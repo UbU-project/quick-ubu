@@ -143,6 +143,11 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         history: usize,
     },
+    /// Restore a decomposed parent locally; omit the prefix to undo the latest record.
+    UndoDecompose {
+        /// Retired parent ID or title prefix.
+        prefix: Option<String>,
+    },
     /// Run classifiers unattended, saving progress after every chunk.
     Batch {
         #[arg(long, value_enum)]
@@ -645,6 +650,22 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 ),
                 None => println!("decomposition aborted; store unchanged"),
             }
+        }
+        Command::UndoDecompose { prefix } => {
+            let index = decompose::resolve_decomposition_index(&store, prefix.as_deref())?;
+            let record = &store.decomposition_history[index];
+            let removed = record
+                .child_ids
+                .iter()
+                .filter(|id| store.tasks.contains_key(id))
+                .count();
+            let mut next = store.clone();
+            decompose::undo_decomposition(&mut next, index)?;
+            backend.save(&next)?;
+            println!(
+                "restored parent: {} ({}); removed {removed} children; run `export` to sync the calendar",
+                record.parent.title, record.parent.id
+            );
         }
         Command::Batch {
             only,

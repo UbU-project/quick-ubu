@@ -318,6 +318,43 @@ pub fn decompose_task<T: LlmTransport, R: DecompositionReviewer>(
     }))
 }
 
+/// Match retired parent IDs (hyphens optional) or case-insensitive title prefixes.
+/// With no prefix, history insertion order determines the most recent record.
+pub fn resolve_decomposition_index(store: &Store, prefix: Option<&str>) -> Result<usize, String> {
+    let Some(prefix) = prefix else {
+        return store
+            .decomposition_history
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| "no decomposition to undo".into());
+    };
+    let title_prefix = prefix.to_lowercase();
+    let id_prefix = title_prefix.replace('-', "");
+    let mut matches = store
+        .decomposition_history
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| {
+            record
+                .parent
+                .id
+                .simple()
+                .to_string()
+                .starts_with(&id_prefix)
+                || record
+                    .parent
+                    .title
+                    .to_lowercase()
+                    .starts_with(&title_prefix)
+        })
+        .map(|(index, _)| index);
+    match (matches.next(), matches.next()) {
+        (None, _) => Err(format!("no decomposition matches {prefix}")),
+        (Some(index), None) => Ok(index),
+        (Some(_), Some(_)) => Err(format!("ambiguous decomposition prefix {prefix}")),
+    }
+}
+
 /// Restore exactly the recorded parent and retire its direct children locally.
 /// The caller persists the result with one atomic save.
 pub fn undo_decomposition(store: &mut Store, record_index: usize) -> Result<(), String> {
