@@ -43,6 +43,7 @@ use ubu_core::{
 
 mod batch;
 mod clarify;
+mod decompose;
 mod logic;
 mod persist;
 mod watch;
@@ -133,6 +134,14 @@ enum Command {
         /// Use the same round cap as batch; finalize after answering this round.
         #[arg(long, default_value_t = 5)]
         round_cap: u32,
+    },
+    /// Review a proposed sub-task chain in EDITOR and replace its parent on commit.
+    Decompose {
+        prefix: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        history: usize,
     },
     /// Run classifiers unattended, saving progress after every chunk.
     Batch {
@@ -616,6 +625,26 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 "clarify-answer: answered {}, finalized {}, proposals queued {}, stopped {}",
                 report.answered, report.finalized, report.queued, report.stopped
             );
+        }
+        Command::Decompose { prefix, model, history } => {
+            let task_id = persist::resolve_task_id(&store, &prefix)?;
+            let model = logic::resolve_model(&store, model)?;
+            println!("Decomposing: {} ({task_id})", store.tasks[&task_id].title);
+            io::stdout().flush().map_err(|error| format!("flush task selection: {error}"))?;
+            let transport = OllamaHttpTransport {
+                base_url: "http://localhost:11434".into(), model,
+                timeout_secs: 300, total_timeout_secs: 1200,
+            };
+            match decompose::decompose_task(
+                &mut store, task_id, &transport, &mut decompose::EditorReviewer,
+                history, Utc::now(), &mut |store| backend.save(store),
+            )? {
+                Some(summary) => println!(
+                    "decomposed {task_id}: created {} sub-tasks, {} duration(s) clamped to the 1-minute floor; calendar cleanup on next export",
+                    summary.child_ids.len(), summary.clamped
+                ),
+                None => println!("decomposition aborted; store unchanged"),
+            }
         }
         Command::Batch {
             only,
