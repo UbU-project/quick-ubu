@@ -403,7 +403,9 @@ pub fn undo_decomposition(store: &mut Store, record_index: usize) -> Result<(), 
         .get(record_index)
         .ok_or_else(|| format!("no decomposition at index {record_index}"))?
         .clone();
-    store.tasks.insert(record.parent.id, record.parent);
+    let parent_id = record.parent.id;
+    let last_child = record.child_ids.last().copied();
+    store.tasks.insert(parent_id, record.parent);
     for child_id in record.child_ids {
         // Missing tasks are harmless; clean up any remaining event metadata too.
         if let Some(event_id) = store.calendar_links.remove(&child_id) {
@@ -411,6 +413,26 @@ pub fn undo_decomposition(store: &mut Store, record_index: usize) -> Result<(), 
         }
         store.tasks.remove(&child_id);
         store.export_signatures.remove(&child_id);
+    }
+    if let Some(last_child) = last_child {
+        for rewire in record.rewires {
+            let Some(task) = store.tasks.get_mut(&rewire.task_id) else {
+                continue;
+            };
+            match rewire.kind {
+                RewireKind::BlockedBy => {
+                    replace_blocked_by(&mut task.blocked_by, last_child, parent_id);
+                }
+                RewireKind::After(offset) => {
+                    for constraint in &mut task.after {
+                        if constraint.task_id == last_child {
+                            constraint.task_id = parent_id;
+                            constraint.offset = offset;
+                        }
+                    }
+                }
+            }
+        }
     }
     store.decomposition_history.remove(record_index);
     Ok(())
