@@ -658,18 +658,19 @@ fn queued_session_is_not_overwritten_and_orphan_is_preserved_without_model_call(
 }
 
 #[test]
-fn default_dispatch_finishes_ready_clarifications_before_tags_then_advice() {
+fn default_dispatch_runs_clarification_after_classifiers_and_only_clarify_stays_isolated() {
     for only in [None, Some(crate::BatchOperation::Clarify)] {
         let mut store = ready_store(&[0, 2, 1]);
         let waiting = Id::from_u128(3);
         store.clarify_sessions.get_mut(&waiting).unwrap().pending = parsed_questions();
         let waiting_before = store.clarify_sessions[&waiting].clone();
         let default = only.is_none();
-        let mut replies = vec![response(vec![], &[], true), questions_reply()];
+        let mut replies = vec![];
         if default {
             replies.push(Ok(r#"{"tags":[]}"#.into()));
             replies.push(Ok(r#"{"dependencies":[],"preferences":[]}"#.into()));
         }
+        replies.extend([response(vec![], &[], true), questions_reply()]);
         let transport = StubTransport::new(replies);
         let mut snapshots = vec![];
         assert_eq!(
@@ -695,17 +696,18 @@ fn default_dispatch_finishes_ready_clarifications_before_tags_then_advice() {
             if default { 4 } else { 2 }
         );
         let prompts = transport.prompts.borrow();
-        assert_eq!(context(&prompts[0])["task"]["title"], "Task 2");
-        assert_eq!(context(&prompts[1])["task"]["title"], "Task 1");
-        assert!(!snapshots[0].clarify_sessions.contains_key(&Id::from_u128(2)));
-        assert!(snapshots[1]
+        let start = if default { 2 } else { 0 };
+        assert_eq!(context(&prompts[start])["task"]["title"], "Task 2");
+        assert_eq!(context(&prompts[start + 1])["task"]["title"], "Task 1");
+        assert!(!snapshots[start].clarify_sessions.contains_key(&Id::from_u128(2)));
+        assert!(snapshots[start + 1]
             .clarify_sessions
             .values()
             .all(|s| !s.pending.is_empty()));
-        assert!(snapshots[1].batch_passes.is_empty());
+        assert_eq!(snapshots[start + 1].batch_passes.len(), if default { 6 } else { 0 });
         if default {
-            assert_eq!(snapshots[2].batch_passes.len(), 3);
-            assert!(snapshots[2]
+            assert_eq!(snapshots[0].batch_passes.len(), 3);
+            assert!(snapshots[0]
                 .batch_passes
                 .keys()
                 .all(|key| key.ends_with("|tags")));

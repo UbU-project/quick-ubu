@@ -449,6 +449,10 @@ mod tests {
             ], at,
         });
         store.pending_event_deletions = vec!["retired-'雪'".into(), "older-event".into()];
+        store.pending_decompositions.insert(id(2), vec![
+            ubu_core::SubTaskProposal { title: "First / 雪".into(), duration_minutes: 1, offset_minutes: 0, clamped: true },
+            ubu_core::SubTaskProposal { title: "Second".into(), duration_minutes: 25, offset_minutes: -5, clamped: false },
+        ]);
         // The first two entries share a timestamp; their insertion order is meaningful.
         for (n, seconds) in [(30, 0), (29, 0), (28, 1)] {
             store.log.push(LogEntry {
@@ -460,6 +464,46 @@ mod tests {
             });
         }
         store
+    }
+
+    #[test]
+    fn pending_decompositions_round_trip_and_legacy_stores_default_to_empty() {
+        let backend = SqliteBackend::in_memory().unwrap();
+        let mut store = populated_store();
+        backend.save(&store).unwrap();
+        assert_eq!(backend.load().unwrap(), store);
+        let data: String = backend
+            .connection
+            .query_row(
+                "SELECT data FROM singletons WHERE key = 'pending_decompositions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&data).unwrap(),
+            serde_json::to_value(&store.pending_decompositions).unwrap()
+        );
+        let json = crate::persist::JsonBackend {
+            path: "memory/pending-decompositions.json".into(),
+        };
+        json.save(&store).unwrap();
+        assert_eq!(json.load().unwrap(), store);
+        let mut legacy = serde_json::to_value(&store).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_decompositions");
+        backend
+            .connection
+            .execute(
+                "DELETE FROM singletons WHERE key = 'pending_decompositions'",
+                [],
+            )
+            .unwrap();
+        store.pending_decompositions.clear();
+        assert_eq!(backend.load().unwrap(), store);
+        assert_eq!(serde_json::from_value::<Store>(legacy).unwrap(), store);
     }
 
     #[test]

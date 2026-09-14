@@ -26,6 +26,130 @@ fn quick_ubu_with_input(store: &Path, command: &str, input: &str) -> Output {
     test_support::run(store, &[command], input)
 }
 
+#[test]
+fn decomposition_suggestion_flags_parse_and_only_decompose_zero_cap_needs_no_network() {
+    use clap::Parser;
+    for (args, expected) in [
+        (vec!["quick-ubu", "batch"], 15),
+        (
+            vec![
+                "quick-ubu",
+                "batch",
+                "--only",
+                "decompose",
+                "--min-minutes",
+                "45",
+            ],
+            45,
+        ),
+    ] {
+        let crate::Command::Batch {
+            only, min_minutes, ..
+        } = crate::Cli::try_parse_from(&args).unwrap().command
+        else {
+            panic!("expected batch");
+        };
+        assert_eq!(min_minutes, expected);
+        if args.len() > 2 {
+            assert_eq!(crate::batch_operations(only), &["decompose"]);
+        } else {
+            assert_eq!(
+                crate::batch_operations(only),
+                &["tags", "advise", "clarify", "decompose"]
+            );
+        }
+    }
+    for invalid in ["-1", "oops", "4294967296"] {
+        assert!(
+            crate::Cli::try_parse_from(["quick-ubu", "batch", "--min-minutes", invalid]).is_err()
+        );
+    }
+    assert!(matches!(
+        crate::Cli::try_parse_from(["quick-ubu", "decompose", "abc", "--review"])
+            .unwrap()
+            .command,
+        crate::Command::Decompose { review: true, .. }
+    ));
+    let (_, path) = memory_store();
+    assert_success(&quick_ubu(
+        &path,
+        &["add", "--title", "Long task", "--duration", "60"],
+    ));
+    let before = fs::read_to_string(&path).unwrap();
+    let output = quick_ubu(
+        &path,
+        &[
+            "batch",
+            "--only",
+            "decompose",
+            "--pass-cap",
+            "0",
+            "--model",
+            "unused",
+        ],
+    );
+    assert_success(&output);
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("batch decompose: tasks processed 0"));
+    assert!(
+        !stdout.contains("batch tags:")
+            && !stdout.contains("batch advise:")
+            && !stdout.contains("batch clarify:")
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
+fn decompose_list_reports_pending_ids_titles_counts_and_missing_review_errors_without_model() {
+    let (_, path) = memory_store();
+    let output = quick_ubu(&path, &["decompose-list"]);
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "No pending decomposition suggestions.\n"
+    );
+    assert_success(&quick_ubu(
+        &path,
+        &["add", "--title", "Review my plan", "--duration", "60"],
+    ));
+    let mut store: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let id = *store.tasks.keys().next().unwrap();
+    let id_text = id.to_string();
+    let before = fs::read_to_string(&path).unwrap();
+    let output = quick_ubu(&path, &["decompose", &id_text, "--review"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("no pending decomposition"));
+    assert!(!stderr.contains("no ollama model"));
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    let proposal = ubu_core::SubTaskProposal {
+        title: "Step".into(),
+        duration_minutes: 1,
+        offset_minutes: 0,
+        clamped: true,
+    };
+    store
+        .pending_decompositions
+        .insert(id, vec![proposal.clone(), proposal.clone()]);
+    store
+        .pending_decompositions
+        .insert(Uuid::nil(), vec![proposal]);
+    test_support::seed(&path, &store);
+    let output = quick_ubu(&path, &["decompose-list"]);
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(&format!(
+        "{}  Review my plan  2 sub-tasks",
+        crate::short_id(id)
+    )));
+    assert!(stdout.contains("00000000  (missing task)  1 sub-tasks"));
+    assert_eq!(
+        serde_json::from_str::<Store>(&fs::read_to_string(&path).unwrap()).unwrap(),
+        store
+    );
+}
+
 fn undo_command_fixture(path: &Path) -> Store {
     assert_success(&quick_ubu(
         path,
@@ -1683,7 +1807,7 @@ fn batch_parses_defaults_only_and_connection_overrides() {
     else {
         panic!("expected batch");
     };
-    assert_eq!(crate::batch_operations(only), &["clarify", "tags", "advise"]);
+    assert_eq!(crate::batch_operations(only), &["tags", "advise", "clarify", "decompose"]);
     assert_eq!((pass_cap, batch_size.get(), history), (3, 25, 20));
     assert!(model.is_none());
     assert_eq!(ollama_url, "http://localhost:11434");

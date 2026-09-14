@@ -6,6 +6,9 @@ use ubu_core::{Commitment, DeferPolicy, Tier, TimeWindow};
 #[path = "decompose_rewire_tests.rs"]
 mod rewiring;
 
+#[path = "decompose_suggest_tests.rs"]
+mod suggestions;
+
 fn at() -> DateTime<Utc> {
     DateTime::from_timestamp(1_800_000_000, 123).unwrap()
 }
