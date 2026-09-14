@@ -298,14 +298,15 @@ fn undo_decompose_saves_once_and_does_not_report_success_when_save_fails() {
         saves: std::cell::Cell<usize>,
     }
     impl StorageBackend for FailingSave {
+        fn latest_actual(&self, _: ubu_core::Id) -> Result<Option<ubu_core::LogEntry>, String> { panic!("undo-decompose does not query actuals") }
         fn append_log(&self, _: &[ubu_core::LogEntry]) -> Result<(), String> {
-            panic!("undo must still use load/save in QL-1")
+            panic!("undo-decompose does not append completion facts")
         }
         fn completions_in_window(&self, _: chrono::DateTime<chrono::Utc>, _: chrono::DateTime<chrono::Utc>) -> Result<Vec<ubu_core::CompletionFact>, String> {
-            panic!("undo must still use Store.log in QL-1")
+            panic!("undo-decompose does not query completion history")
         }
         fn recent_completions(&self, _: usize) -> Result<Vec<ubu_core::CompletionFact>, String> {
-            panic!("undo must still use Store.log in QL-1")
+            panic!("undo-decompose does not query completion history")
         }
         fn load(&self) -> Result<Store, String> {
             Ok(self.before.clone())
@@ -506,16 +507,12 @@ fn done_persists_completion_and_report_reads_it_without_mutating_store() {
     let store: Store = serde_json::from_str(&contents).unwrap();
     let id = Uuid::parse_str(task_id.trim()).unwrap();
     assert_eq!(store.tasks[&id].status, TaskStatus::Done);
-    assert_eq!(store.log.len(), 1);
-    assert!(before <= store.log[0].at && store.log[0].at <= after);
-    assert_eq!(
-        store.log[0].kind,
-        ubu_core::LogEntryKind::Fact(ubu_core::FactKind::Actual {
-            item_id: id,
-            status: ubu_core::ActualStatus::Done,
-            actual: None,
-        })
-    );
+    let completions = crate::test_support::recent_completions(&store_path, 10);
+    assert_eq!(completions.len(), 1);
+    assert!(before <= completions[0].at && completions[0].at <= after);
+    assert_eq!(completions[0].item_id, id);
+    assert_eq!(completions[0].actual, None);
+    assert!(serde_json::from_str::<serde_json::Value>(&contents).unwrap().get("log").is_none());
     let report = quick_ubu(&store_path, &["report"]);
     assert_success(&report);
     assert_eq!(
@@ -2073,4 +2070,31 @@ fn clarify_answer_without_pending_questions_needs_no_model_or_editor() {
         before
     );
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn batch_handler_queries_history_once_before_dispatching_operations() {
+    use crate::persist::{SqliteBackend, StorageBackend};
+    use clap::Parser;
+    struct CountingBackend {
+        sqlite: SqliteBackend,
+        calls: std::cell::Cell<usize>,
+    }
+    impl StorageBackend for CountingBackend {
+        fn load(&self) -> Result<Store, String> { self.sqlite.load() }
+        fn save(&self, store: &Store) -> Result<(), String> { self.sqlite.save(store) }
+        fn append_log(&self, entries: &[ubu_core::LogEntry]) -> Result<(), String> { self.sqlite.append_log(entries) }
+        fn latest_actual(&self, task_id: Uuid) -> Result<Option<ubu_core::LogEntry>, String> { self.sqlite.latest_actual(task_id) }
+        fn completions_in_window(&self, from: chrono::DateTime<chrono::Utc>, to: chrono::DateTime<chrono::Utc>) -> Result<Vec<ubu_core::CompletionFact>, String> { self.sqlite.completions_in_window(from, to) }
+        fn recent_completions(&self, limit: usize) -> Result<Vec<ubu_core::CompletionFact>, String> {
+            assert_eq!(limit, 7);
+            self.calls.set(self.calls.get() + 1);
+            self.sqlite.recent_completions(limit)
+        }
+    }
+    let backend = CountingBackend { sqlite: SqliteBackend::in_memory().unwrap(), calls: std::cell::Cell::new(0) };
+    // Empty store dispatches every default operation without making a model call.
+    let command = crate::Cli::try_parse_from(["quick-ubu", "batch", "--model", "stub", "--history", "7"]).unwrap();
+    assert_eq!(crate::run_with_backend(command, &backend).unwrap(), 0);
+    assert_eq!(backend.calls.get(), 1);
 }

@@ -47,7 +47,7 @@ fn decompose(
             result: Some(edited()),
             seen: vec![],
         },
-        0,
+        &[],
         at(),
         save,
     )
@@ -258,7 +258,7 @@ fn abort_or_failed_save_preserves_external_references_and_history() {
                 result: if abort { None } else { Some(edited()) },
                 seen: vec![],
             },
-            0,
+            &[],
             at(),
             &mut |s| {
                 saves += 1;

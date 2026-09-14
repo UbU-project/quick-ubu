@@ -171,3 +171,8 @@ pub mod fs {
         })
     }
 }
+
+/// Query the same in-memory backend used by command invocations.
+pub fn recent_completions(path: &Path, limit: usize) -> Vec<ubu_core::CompletionFact> {
+    STATE.with(|state| state.borrow().databases[path].recent_completions(limit).unwrap())
+}

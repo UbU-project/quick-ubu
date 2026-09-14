@@ -82,7 +82,7 @@ fn auto_queue_selects_open_dynamic_blank_tasks_and_preserves_existing_sessions()
             &mut store,
             &StubTransport::new(vec![]),
             0,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |s| backend.save(s)
         ),
@@ -113,7 +113,7 @@ fn auto_queue_selects_open_dynamic_blank_tasks_and_preserves_existing_sessions()
             &mut store,
             &transport,
             5,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |s| backend.save(s)
         ),
@@ -139,7 +139,7 @@ fn auto_queue_selects_open_dynamic_blank_tasks_and_preserves_existing_sessions()
             &mut store,
             &StubTransport::new(vec![]),
             5,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |_| panic!("nothing changed")
         ),
@@ -161,7 +161,7 @@ fn auto_queue_is_saved_before_generation_and_honors_interrupts_and_save_errors()
             &mut store,
             &transport,
             5,
-            0,
+            &[],
             &AtomicBool::new(true),
             &mut |_| Ok(())
         ),
@@ -171,7 +171,7 @@ fn auto_queue_is_saved_before_generation_and_honors_interrupts_and_save_errors()
     let flag = AtomicBool::new(false);
     let backend = SqliteBackend::in_memory().unwrap();
     assert_eq!(
-        run_clarify_batch(&mut store, &transport, 5, 0, &flag, &mut |s| {
+        run_clarify_batch(&mut store, &transport, 5, &[], &flag, &mut |s| {
             backend.save(s)?;
             flag.store(true, Ordering::SeqCst);
             Ok(())
@@ -187,7 +187,7 @@ fn auto_queue_is_saved_before_generation_and_honors_interrupts_and_save_errors()
             &mut store,
             &transport,
             5,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |_| Err("disk full".into())
         ),
@@ -221,7 +221,7 @@ fn queued_lifecycle_survives_reload_between_generation_answers_and_finalization(
             &mut store,
             &transport,
             5,
-            20,
+            &[],
             &AtomicBool::new(false),
             &mut |s| {
                 saves += 1;
@@ -252,7 +252,7 @@ fn queued_lifecycle_survives_reload_between_generation_answers_and_finalization(
             &mut store,
             &transport,
             5,
-            20,
+            &[],
             &AtomicBool::new(false),
             &mut |s| backend.save(s)
         ),
@@ -296,7 +296,7 @@ fn ready_sessions_run_highest_round_first_with_id_ties_and_skip_pending_or_cappe
             &mut store,
             &transport,
             5,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |_| {
                 saves += 1;
@@ -332,7 +332,7 @@ fn interrupt_after_first_task_saves_most_advanced_progress_and_leaves_others_unt
     let transport = StubTransport::new(vec![questions_reply()]);
     let mut snapshots = vec![];
     assert_eq!(
-        run_clarify_batch(&mut store, &transport, 5, 0, &flag, &mut |s| {
+        run_clarify_batch(&mut store, &transport, 5, &[], &flag, &mut |s| {
             snapshots.push(s.clone());
             flag.store(true, Ordering::SeqCst);
             Ok(())
@@ -362,7 +362,7 @@ fn cap_with_useful_questions_finalizes_after_answers_without_another_generation(
             &mut store,
             &transport,
             5,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |_| Ok(())
         ),
@@ -376,7 +376,7 @@ fn cap_with_useful_questions_finalizes_after_answers_without_another_generation(
             &mut store,
             &transport,
             5,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |_| panic!("no ready task")
         ),
@@ -406,7 +406,7 @@ fn empty_question_rounds_advance_until_cap_and_then_finalize() {
                 &mut store,
                 &transport,
                 3,
-                0,
+                &[],
                 &AtomicBool::new(false),
                 &mut |_| Ok(())
             ),
@@ -421,7 +421,7 @@ fn empty_question_rounds_advance_until_cap_and_then_finalize() {
             &mut store,
             &transport,
             3,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |_| Ok(())
         ),
@@ -445,7 +445,7 @@ fn done_finalizes_even_with_questions_and_custom_caps_are_respected() {
             &mut store,
             &transport,
             2,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |_| Ok(())
         ),
@@ -458,7 +458,7 @@ fn done_finalizes_even_with_questions_and_custom_caps_are_respected() {
         &mut store,
         &transport,
         2,
-        0,
+        &[],
         &AtomicBool::new(false),
         &mut |_| Ok(()),
     );
@@ -491,7 +491,7 @@ fn model_errors_preserve_sessions_and_do_not_block_other_ready_tasks() {
             &mut store,
             &transport,
             5,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |s| {
                 snapshots.push(s.clone());
@@ -591,7 +591,7 @@ fn preexisting_and_last_task_interrupts_and_save_errors_are_nonzero() {
             &mut store,
             &transport,
             5,
-            0,
+            &[],
             &AtomicBool::new(true),
             &mut |_| {
                 saves += 1;
@@ -608,7 +608,7 @@ fn preexisting_and_last_task_interrupts_and_save_errors_are_nonzero() {
             &mut store,
             &transport,
             5,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |_| Err("disk full".into())
         ),
@@ -621,7 +621,7 @@ fn preexisting_and_last_task_interrupts_and_save_errors_are_nonzero() {
     let mut store = ready_store(&[0]);
     let transport = StubTransport::new(vec![response(vec![], &[], true)]);
     let flag = AtomicBool::new(false);
-    let outcome = run_clarify_batch(&mut store, &transport, 5, 0, &flag, &mut |_| {
+    let outcome = run_clarify_batch(&mut store, &transport, 5, &[], &flag, &mut |_| {
         flag.store(true, Ordering::SeqCst);
         Ok(())
     });
@@ -648,7 +648,7 @@ fn queued_session_is_not_overwritten_and_orphan_is_preserved_without_model_call(
             &mut store,
             &transport,
             5,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |_| Ok(())
         ),
@@ -679,7 +679,7 @@ fn default_dispatch_runs_clarification_before_classifiers_and_only_clarify_stays
                 crate::batch_operations(only),
                 3,
                 25,
-                0,
+                &[],
                 5,
                 u32::MAX,
                 &AtomicBool::new(false),

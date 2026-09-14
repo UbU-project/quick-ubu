@@ -57,8 +57,16 @@ pub fn report_by_category(
 mod tests {
     use super::*;
     use crate::{
-        log_actual, log_defer, DeferPolicy, Id, Provenance, Task, TaskStatus, Tier, TimeWindow,
+        log_actual, log_defer, ActualStatus, FactKind, LogEntryKind, DeferPolicy, Id, Provenance, Task, TaskStatus, Tier, TimeWindow,
     };
+
+    fn facts(entries: &[crate::LogEntry]) -> Vec<CompletionFact> {
+        entries.iter().filter_map(|entry| match &entry.kind {
+            LogEntryKind::Fact(FactKind::Actual { item_id, status: ActualStatus::Done, actual }) =>
+                Some(CompletionFact { item_id: *item_id, at: entry.at, actual: actual.clone() }),
+            _ => None,
+        }).collect()
+    }
 
     fn at(minutes: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(minutes * 60, 0).unwrap()
@@ -101,6 +109,7 @@ mod tests {
     #[test]
     fn pinned_windows_are_clamped_and_outside_or_touching_windows_are_excluded() {
         let mut store = Store::new();
+        let entries = Vec::new();
         for task in [
             task(1, Some("inside"), Some(window(20, 50))),
             task(2, Some("outside"), Some(window(110, 150))),
@@ -114,7 +123,7 @@ mod tests {
         }
         let before = store.clone();
         assert_eq!(
-            report_by_category(&store, at(0), at(100)),
+            report_by_category(&store, &facts(&entries), at(0), at(100)),
             BTreeMap::from([
                 ("inside".into(), Duration::minutes(30)),
                 ("clipped".into(), Duration::minutes(20)),
@@ -127,13 +136,14 @@ mod tests {
     #[test]
     fn transparent_pinned_tasks_are_counted_regardless_of_status_or_tier() {
         let mut store = Store::new();
+        let entries = Vec::new();
         let mut transparent = task(1, Some("personal"), Some(window(10, 70)));
         transparent.transparent = true;
         transparent.status = TaskStatus::Deferred;
         transparent.tier = Tier::TopSecret;
         store.upsert_task(transparent);
         assert_eq!(
-            report_by_category(&store, at(0), at(100))["personal"],
+            report_by_category(&store, &facts(&entries), at(0), at(100))["personal"],
             Duration::hours(1)
         );
     }
@@ -141,36 +151,37 @@ mod tests {
     #[test]
     fn dynamic_done_uses_actual_or_estimate_and_pinned_actual_is_not_double_counted() {
         let mut store = Store::new();
+        let mut entries = Vec::new();
         for id in 1..=3 {
             store.upsert_task(task(id, Some("work"), None));
         }
         store.upsert_task(task(4, Some("routine"), Some(window(10, 20))));
-        store.append_log(log_actual(
+        entries.push(log_actual(
             Id::from_u128(1),
             ActualStatus::Done,
             Some(window(-60, 180)),
             at(50),
         ));
-        store.append_log(log_actual(
+        entries.push(log_actual(
             Id::from_u128(2),
             ActualStatus::Done,
             None,
             at(0),
         ));
-        store.append_log(log_actual(
+        entries.push(log_actual(
             Id::from_u128(3),
             ActualStatus::Done,
             None,
             at(100),
         ));
-        store.append_log(log_actual(
+        entries.push(log_actual(
             Id::from_u128(4),
             ActualStatus::Done,
             Some(window(0, 100)),
             at(50),
         ));
         assert_eq!(
-            report_by_category(&store, at(0), at(100)),
+            report_by_category(&store, &facts(&entries), at(0), at(100)),
             BTreeMap::from([
                 ("work".into(), Duration::minutes(300)),
                 ("routine".into(), Duration::minutes(10)),
@@ -181,50 +192,52 @@ mod tests {
     #[test]
     fn unrelated_logs_outside_completions_and_unlogged_done_tasks_are_not_counted() {
         let mut store = Store::new();
+        let mut entries = Vec::new();
         let mut dynamic = task(1, Some("work"), None);
         dynamic.status = TaskStatus::Done;
         store.upsert_task(dynamic);
-        store.append_log(log_actual(
+        entries.push(log_actual(
             Id::from_u128(1),
             ActualStatus::Done,
             None,
             at(-1),
         ));
-        store.append_log(log_actual(
+        entries.push(log_actual(
             Id::from_u128(1),
             ActualStatus::Done,
             None,
             at(101),
         ));
-        store.append_log(log_actual(
+        entries.push(log_actual(
             Id::from_u128(1),
             ActualStatus::Ongoing,
             None,
             at(50),
         ));
-        store.append_log(log_actual(
+        entries.push(log_actual(
             Id::from_u128(999),
             ActualStatus::Done,
             None,
             at(50),
         ));
-        store.append_log(log_defer(Id::from_u128(1), at(50)));
-        assert!(report_by_category(&store, at(0), at(100)).is_empty());
+        entries.push(log_defer(Id::from_u128(1), at(50)));
+        assert!(report_by_category(&store, &facts(&entries), at(0), at(100)).is_empty());
     }
 
     #[test]
     fn uncategorized_pinned_and_dynamic_durations_share_a_bucket() {
         let mut store = Store::new();
+        let mut entries = Vec::new();
         store.upsert_task(task(1, None, Some(window(10, 70))));
         store.upsert_task(task(2, None, None));
-        store.append_log(log_actual(
+        entries.push(log_actual(
             Id::from_u128(2),
             ActualStatus::Done,
             None,
             at(50),
         ));
         assert_eq!(
-            report_by_category(&store, at(0), at(100)),
+            report_by_category(&store, &facts(&entries), at(0), at(100)),
             BTreeMap::from([("(uncategorized)".into(), Duration::minutes(90)),])
         );
     }
@@ -232,23 +245,24 @@ mod tests {
     #[test]
     fn every_done_fact_is_counted_and_reversed_windows_are_empty() {
         let mut store = Store::new();
+        let mut entries = Vec::new();
         store.upsert_task(task(1, Some("work"), None));
-        store.append_log(log_actual(
+        entries.push(log_actual(
             Id::from_u128(1),
             ActualStatus::Done,
             None,
             at(50),
         ));
-        store.append_log(log_actual(
+        entries.push(log_actual(
             Id::from_u128(1),
             ActualStatus::Done,
             None,
             at(50),
         ));
         assert_eq!(
-            report_by_category(&store, at(50), at(50))["work"],
+            report_by_category(&store, &facts(&entries), at(50), at(50))["work"],
             Duration::hours(1)
         );
-        assert!(report_by_category(&store, at(100), at(0)).is_empty());
+        assert!(report_by_category(&store, &facts(&entries), at(100), at(0)).is_empty());
     }
 }

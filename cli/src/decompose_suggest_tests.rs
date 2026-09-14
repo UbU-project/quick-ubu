@@ -82,7 +82,7 @@ fn suggestion_prompt_allows_declining_without_losing_parent_and_history_context(
         id(1),
         &ScriptModel::new(vec![decline()]),
         &mut reviewer,
-        0,
+        &[],
         at(),
         &mut |_| panic!("must not save")
     )
@@ -113,7 +113,7 @@ fn eligibility_applies_minimum_pass_cap_pending_state_status_and_pinning_without
             &model,
             3,
             15,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |s| {
                 snapshots.push(s.clone());
@@ -163,7 +163,7 @@ fn declines_and_errors_count_attempts_and_stop_at_cap() {
                 &model,
                 1,
                 15,
-                0,
+                &[],
                 &AtomicBool::new(false),
                 &mut |_| {
                     saves += 1;
@@ -195,7 +195,7 @@ fn interrupt_saves_first_suggestion_and_resume_skips_it() {
             &ScriptModel::new(vec![propose()]),
             3,
             15,
-            0,
+            &[],
             &flag,
             &mut |s| {
                 saves += 1;
@@ -215,7 +215,7 @@ fn interrupt_saves_first_suggestion_and_resume_skips_it() {
     flag.store(false, Ordering::SeqCst);
     let model = ScriptModel::new(vec![propose(), decline()]);
     assert_eq!(
-        run_decompose_suggest_batch(&mut store, &model, 3, 15, 0, &flag, &mut |s| backend
+        run_decompose_suggest_batch(&mut store, &model, 3, 15, &[], &flag, &mut |s| backend
             .save(s)),
         BatchOutcome::Completed
     );
@@ -234,7 +234,7 @@ fn initial_and_final_interrupts_and_save_failure_stop_generation() {
             &ScriptModel::new(vec![]),
             3,
             15,
-            0,
+            &[],
             &AtomicBool::new(true),
             &mut |_| {
                 saves += 1;
@@ -252,7 +252,7 @@ fn initial_and_final_interrupts_and_save_failure_stop_generation() {
             &ScriptModel::new(vec![decline()]),
             3,
             15,
-            0,
+            &[],
             &flag,
             &mut |_| {
                 flag.store(true, Ordering::SeqCst);
@@ -268,7 +268,7 @@ fn initial_and_final_interrupts_and_save_failure_stop_generation() {
             &ScriptModel::new(vec![propose()]),
             3,
             15,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |_| Err("disk full".into())
         ),
@@ -302,7 +302,7 @@ fn default_batch_orders_clarify_tags_advise_decompose_and_only_decompose_is_isol
                 crate::batch_operations(only),
                 3,
                 25,
-                0,
+                &[],
                 5,
                 15,
                 &AtomicBool::new(false),
@@ -416,7 +416,7 @@ fn fresh_commit_consumes_stale_suggestion_and_review_failures_preserve_it() {
         id(1),
         &model,
         &mut reviewer,
-        0,
+        &[],
         at(),
         &mut |_| Ok(()),
     )

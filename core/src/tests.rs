@@ -251,15 +251,7 @@ fn crud_roundtrips_for_every_entity() {
     store.add_preference(preference.clone());
     assert_eq!(store.preferences(), &[preference]);
 
-    let entry = LogEntry {
-        id: id(9),
-        kind: LogEntryKind::Command(CommandKind::Defer { handle_id: id(1) }),
-        at: at(1),
-    };
-    store.append_log(entry.clone());
-    store.append_log(entry.clone());
-    // The log is append-only: entries accumulate in insertion order.
-    assert_eq!(store.log(), &[entry.clone(), entry]);
+    assert!(serde_json::to_value(&store).unwrap().get("log").is_none());
 }
 
 #[test]
@@ -1483,6 +1475,7 @@ fn completed_history_filters_orders_and_uses_latest_log_timestamp() {
     store.tasks.get_mut(&id(7)).unwrap().status = TaskStatus::Scheduled;
     store.tasks.get_mut(&id(8)).unwrap().status = TaskStatus::Active;
     store.tasks.get_mut(&id(9)).unwrap().status = TaskStatus::Deferred;
+    let mut completions = Vec::new();
     // Out-of-order log, repeated completions, missing task 99, no Done fact for 5.
     for (n, seconds, status) in [
         (1, 90, ActualStatus::Done),
@@ -1496,22 +1489,14 @@ fn completed_history_filters_orders_and_uses_latest_log_timestamp() {
         (8, 100, ActualStatus::Done),
         (9, 100, ActualStatus::Done),
     ] {
-        store.append_log(LogEntry {
-            id: id(100 + store.log.len() as u128),
-            at: at(seconds),
-            kind: LogEntryKind::Fact(FactKind::Actual {
-                item_id: id(n),
-                status,
-                // Deliberately differs from entry.at.
-                actual: Some(TimeWindow {
-                    start: at(1),
-                    end: at(2),
-                }),
-            }),
-        });
+        if status == ActualStatus::Done {
+            completions.push(crate::CompletionFact {
+                item_id: id(n), at: at(seconds), actual: Some(TimeWindow { start: at(1), end: at(2) }),
+            });
+        }
     }
     let before = store.clone();
-    let examples = recent_completed_examples(&store, 20);
+    let examples = recent_completed_examples(&store, &completions);
     assert_eq!(examples.len(), 2);
     for (example, n, seconds) in [(&examples[0], 1, 90), (&examples[1], 2, 80)] {
         let task = &store.tasks[&id(n)];
@@ -1526,9 +1511,9 @@ fn completed_history_filters_orders_and_uses_latest_log_timestamp() {
             }
         );
     }
-    assert_eq!(recent_completed_examples(&store, 1), examples[..1]);
-    assert!(recent_completed_examples(&store, 0).is_empty());
-    assert!(recent_completed_examples(&Store::new(), 20).is_empty());
+    assert_eq!(recent_completed_examples(&store, &completions[..1]), examples[..1]);
+    assert!(recent_completed_examples(&store, &[]).is_empty());
+    assert!(recent_completed_examples(&Store::new(), &completions).is_empty());
     assert_eq!(store, before);
 }
 
@@ -1536,22 +1521,15 @@ fn completed_history_filters_orders_and_uses_latest_log_timestamp() {
 fn completed_history_ties_use_task_id_order_and_allow_absent_category() {
     use crate::recent_completed_examples;
     let mut store = Store::new();
+    let mut completions = Vec::new();
     for n in [2, 1] {
         let mut task = task(n);
         task.status = TaskStatus::Done;
         task.tags = vec!["tag".into()];
         store.upsert_task(task);
-        store.append_log(LogEntry {
-            id: id(n + 100),
-            at: at(50),
-            kind: LogEntryKind::Fact(FactKind::Actual {
-                item_id: id(n),
-                status: ActualStatus::Done,
-                actual: None,
-            }),
-        });
+        completions.push(crate::CompletionFact { item_id: id(n), at: at(50), actual: None });
     }
-    let examples = recent_completed_examples(&store, 20);
+    let examples = recent_completed_examples(&store, &completions);
     assert_eq!(
         examples
             .iter()

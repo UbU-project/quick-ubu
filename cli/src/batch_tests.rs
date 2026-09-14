@@ -117,7 +117,7 @@ fn task_progress_is_visible_before_model_calls_with_operation_totals_and_chunk_r
                 &[op],
                 3,
                 2,
-                0,
+                &[],
                 5,
                 15,
                 &AtomicBool::new(false),
@@ -192,7 +192,7 @@ fn eligibility_respects_active_unpinned_tasks_per_op_caps_and_counts_generate_er
             &["tags"],
             3,
             2,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |store| {
                 snapshots.push(store.clone());
@@ -241,7 +241,7 @@ fn repeated_runs_bound_generate_and_parse_failures_by_the_cap() {
                 &["tags"],
                 2,
                 25,
-                0,
+                &[],
                 &AtomicBool::new(false),
                 &mut |_| {
                     saves += 1;
@@ -280,7 +280,7 @@ fn default_operations_enqueue_all_batches_and_save_once_per_chunk() {
             crate::batch_operations(None),
             3,
             2,
-            0,
+            &[],
             5,
             u32::MAX,
             &AtomicBool::new(false),
@@ -336,7 +336,7 @@ fn only_operation_restricts_proposals_and_pass_counters() {
                 crate::batch_operations(Some(choice)),
                 3,
                 25,
-                0,
+                &[],
                 &AtomicBool::new(false),
                 &mut |_| Ok(())
             ),
@@ -365,7 +365,7 @@ fn interrupt_after_first_chunk_saves_progress_stops_and_resumes_from_saved_count
             &["tags"],
             1,
             2,
-            0,
+            &[],
             &interrupted,
             &mut |store| {
                 snapshots.push(store.clone());
@@ -392,7 +392,7 @@ fn interrupt_after_first_chunk_saves_progress_stops_and_resumes_from_saved_count
             &["tags"],
             1,
             2,
-            0,
+            &[],
             &interrupted,
             &mut |_| {
                 saves += 1;
@@ -427,7 +427,7 @@ fn interrupt_during_last_request_is_saved_and_never_returns_completed() {
             &["tags"],
             3,
             25,
-            0,
+            &[],
             &interrupted,
             &mut |store| {
                 snapshots.push(store.clone());
@@ -455,7 +455,7 @@ fn already_interrupted_saves_even_when_no_work_remains() {
                 &["tags"],
                 0,
                 25,
-                0,
+                &[],
                 &AtomicBool::new(true),
                 &mut |saved| {
                     assert_eq!(saved, &before);
@@ -483,7 +483,7 @@ fn setup_and_save_failures_are_fatal_without_running_further_chunks() {
                 &ops,
                 3,
                 size,
-                0,
+                &[],
                 &AtomicBool::new(false),
                 &mut |_| panic!("setup failure must not save")
             ),
@@ -500,7 +500,7 @@ fn setup_and_save_failures_are_fatal_without_running_further_chunks() {
             &["tags"],
             3,
             2,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |_| Err("disk full".into())
         ),
@@ -516,7 +516,7 @@ fn setup_and_save_failures_are_fatal_without_running_further_chunks() {
             &["tags"],
             3,
             2,
-            0,
+            &[],
             &AtomicBool::new(true),
             &mut |_| Err("disk full".into())
         ),
@@ -527,13 +527,15 @@ fn setup_and_save_failures_are_fatal_without_running_further_chunks() {
 #[test]
 fn category_order_history_and_batch_local_indices_are_preserved() {
     use ubu_core::{ActualStatus, FactKind, LogEntry, LogEntryKind};
+    use crate::persist::StorageBackend;
+    let backend = crate::persist::SqliteBackend::in_memory().unwrap();
     let mut store = store(3);
     store.tasks.get_mut(&id(1)).unwrap().category = Some("zeta".into());
     store.tasks.get_mut(&id(2)).unwrap().category = Some("alpha".into());
     let done = store.tasks.get_mut(&id(3)).unwrap();
     done.status = TaskStatus::Done;
     done.tags = vec!["history".into()];
-    store.append_log(LogEntry {
+    backend.append_log(&[LogEntry {
         id: id(100),
         at: Utc.with_ymd_and_hms(2026, 9, 13, 12, 0, 0).unwrap(),
         kind: LogEntryKind::Fact(FactKind::Actual {
@@ -541,7 +543,8 @@ fn category_order_history_and_batch_local_indices_are_preserved() {
             status: ActualStatus::Done,
             actual: None,
         }),
-    });
+    }]).unwrap();
+    let history = ubu_core::recent_completed_examples(&store, &backend.recent_completions(1).unwrap());
     let transport = StubTransport::new(vec![tag_reply(1), tag_reply(1)]);
     assert_eq!(
         run_batch(
@@ -550,7 +553,7 @@ fn category_order_history_and_batch_local_indices_are_preserved() {
             &["tags"],
             3,
             1,
-            1,
+            &history,
             &AtomicBool::new(false),
             &mut |_| Ok(())
         ),
@@ -573,7 +576,7 @@ fn zero_cap_and_empty_store_make_no_calls_and_maximum_cap_does_not_overflow() {
                 &["tags", "advise"],
                 cap,
                 25,
-                0,
+                &[],
                 &AtomicBool::new(false),
                 &mut |_| panic!("no chunks to save")
             ),
@@ -592,7 +595,7 @@ fn zero_cap_and_empty_store_make_no_calls_and_maximum_cap_does_not_overflow() {
             &["tags"],
             u32::MAX,
             25,
-            0,
+            &[],
             &AtomicBool::new(false),
             &mut |_| Ok(())
         ),
