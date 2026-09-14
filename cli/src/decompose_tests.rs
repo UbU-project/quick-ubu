@@ -405,3 +405,204 @@ fn unlinked_parent_and_single_child_do_not_queue_a_calendar_deletion() {
     assert_eq!(summary.child_ids.len(), 1);
     assert_eq!(store.pending_event_deletions, prior);
 }
+
+fn committed_store() -> (Store, Vec<Id>) {
+    let mut store = store();
+    let summary = decompose_task(
+        &mut store,
+        parent().id,
+        &model(),
+        &mut Reviewer {
+            result: Some(edited()),
+            seen: vec![],
+        },
+        0,
+        at(),
+        &mut |_| Ok(()),
+    )
+    .unwrap()
+    .unwrap();
+    (store, summary.child_ids)
+}
+
+#[test]
+fn undo_restores_full_dc1_snapshot_removes_children_and_round_trips_sqlite() {
+    let (mut store, children) = committed_store();
+    let original = parent();
+    let previous_deletions = store.pending_event_deletions.clone();
+    for (index, id) in children.iter().enumerate() {
+        store
+            .calendar_links
+            .insert(*id, format!("child-event-{index}"));
+        store
+            .export_signatures
+            .insert(*id, format!("child-signature-{index}"));
+        store.tasks.get_mut(id).unwrap().title = "Edited since decomposition".into();
+    }
+    let mut unrelated = original.clone();
+    unrelated.id = Id::from_u128(900);
+    store.upsert_task(unrelated.clone());
+    store
+        .calendar_links
+        .insert(unrelated.id, "unrelated-event".into());
+    store
+        .export_signatures
+        .insert(unrelated.id, "unrelated-signature".into());
+    let backend = SqliteBackend::in_memory().unwrap();
+    backend.save(&store).unwrap();
+    store = backend.load().unwrap();
+    assert_eq!(store.decomposition_history.len(), 1);
+    undo_decomposition(&mut store, 0).unwrap();
+    backend.save(&store).unwrap();
+    assert_eq!(backend.load().unwrap(), store);
+    assert_eq!(
+        serde_json::to_vec(&store.tasks[&original.id]).unwrap(),
+        serde_json::to_vec(&original).unwrap()
+    );
+    for id in &children {
+        assert!(!store.tasks.contains_key(id));
+        assert!(!store.calendar_links.contains_key(id));
+        assert!(!store.export_signatures.contains_key(id));
+    }
+    assert!(!store.calendar_links.contains_key(&original.id));
+    assert!(!store.export_signatures.contains_key(&original.id));
+    let mut expected = previous_deletions;
+    expected.extend((0..3).map(|n| format!("child-event-{n}")));
+    assert_eq!(store.pending_event_deletions, expected);
+    assert!(store.decomposition_history.is_empty());
+    assert_eq!(store.tasks[&unrelated.id], unrelated);
+    assert_eq!(store.calendar_links[&unrelated.id], "unrelated-event");
+    assert_eq!(
+        store.export_signatures[&unrelated.id],
+        "unrelated-signature"
+    );
+}
+
+#[test]
+fn undo_tolerates_missing_children_cleans_stale_links_and_removes_completed_children() {
+    let (mut store, children) = committed_store();
+    store.tasks.remove(&children[0]);
+    store.tasks.remove(&children[1]);
+    store
+        .calendar_links
+        .insert(children[1], "stale-child-event".into());
+    store
+        .export_signatures
+        .insert(children[1], "stale-signature".into());
+    store.tasks.get_mut(&children[2]).unwrap().status = TaskStatus::Done;
+    undo_decomposition(&mut store, 0).unwrap();
+    assert_eq!(store.tasks.len(), 1);
+    assert_eq!(store.tasks[&parent().id], parent());
+    assert!(store.calendar_links.is_empty());
+    assert!(store.export_signatures.is_empty());
+    assert_eq!(
+        store.pending_event_deletions,
+        ["older-event", "parent-event", "stale-child-event"]
+    );
+    assert!(store.decomposition_history.is_empty());
+
+    let (mut store, _) = committed_store();
+    store.tasks.clear();
+    undo_decomposition(&mut store, 0).unwrap();
+    assert_eq!(store.tasks[&parent().id], parent());
+    let after = store.clone();
+    assert!(undo_decomposition(&mut store, 0).is_err());
+    assert_eq!(store, after);
+}
+
+#[test]
+fn undo_invalid_index_is_unchanged_and_existing_parent_is_replaced_by_snapshot() {
+    let (mut store, _) = committed_store();
+    let before = store.clone();
+    for invalid in [1, usize::MAX] {
+        assert!(undo_decomposition(&mut store, invalid).is_err());
+        assert_eq!(store, before);
+    }
+    let mut changed = parent();
+    changed.title = "Reintroduced parent".into();
+    store.upsert_task(changed);
+    undo_decomposition(&mut store, 0).unwrap();
+    assert_eq!(store.tasks[&parent().id], parent());
+}
+
+#[test]
+fn undo_selection_uses_last_record_and_retired_parent_id_or_title_prefixes() {
+    let mut store = Store::new();
+    assert!(resolve_decomposition_index(&store, None).is_err());
+    assert!(resolve_decomposition_index(&store, Some("missing")).is_err());
+    for (id, title, timestamp) in [
+        ("aabbccdd-1111-2222-3333-444455556666", "Café Alpha", at()),
+        (
+            "eeffccdd-1111-2222-3333-444455556666",
+            "Café Beta",
+            at() - Duration::days(1),
+        ),
+    ] {
+        let mut parent = parent();
+        parent.id = Id::parse_str(id).unwrap();
+        parent.title = title.into();
+        store.decomposition_history.push(DecompositionRecord {
+            id: Id::new_v4(),
+            parent,
+            child_ids: vec![],
+            at: timestamp,
+        });
+    }
+    assert_eq!(resolve_decomposition_index(&store, None).unwrap(), 1);
+    for prefix in ["AABBCCDD-1111", "aabbccdd1111", "aabb", "CAFÉ A"] {
+        assert_eq!(
+            resolve_decomposition_index(&store, Some(prefix)).unwrap(),
+            0
+        );
+    }
+    assert_eq!(
+        resolve_decomposition_index(&store, Some("café b")).unwrap(),
+        1
+    );
+    assert!(resolve_decomposition_index(&store, Some("Café"))
+        .unwrap_err()
+        .contains("ambiguous"));
+    assert!(resolve_decomposition_index(&store, Some("unknown"))
+        .unwrap_err()
+        .contains("no decomposition"));
+    let record_id = store.decomposition_history[0].id.to_string();
+    assert!(resolve_decomposition_index(&store, Some(&record_id)).is_err());
+    // ID and title matches participate in the same ambiguity check.
+    store.decomposition_history[1].parent.title = "aabb title".into();
+    assert!(resolve_decomposition_index(&store, Some("aabb"))
+        .unwrap_err()
+        .contains("ambiguous"));
+    store.decomposition_history[1].parent.title = "Café Alpha".into();
+    assert!(resolve_decomposition_index(&store, Some("Café Alpha"))
+        .unwrap_err()
+        .contains("ambiguous"));
+}
+
+#[test]
+fn undo_outer_record_does_not_recursively_remove_nested_children_or_history() {
+    let (mut store, children) = committed_store();
+    let nested = decompose_task(
+        &mut store,
+        children[0],
+        &model(),
+        &mut Reviewer {
+            result: Some(edited()),
+            seen: vec![],
+        },
+        0,
+        at(),
+        &mut |_| Ok(()),
+    )
+    .unwrap()
+    .unwrap();
+    let nested_record = store.decomposition_history[1].clone();
+    undo_decomposition(&mut store, 0).unwrap();
+    assert_eq!(store.decomposition_history, vec![nested_record]);
+    for id in nested.child_ids {
+        assert!(store.tasks.contains_key(&id));
+    }
+    for id in children {
+        assert!(!store.tasks.contains_key(&id));
+    }
+    assert_eq!(store.tasks[&parent().id], parent());
+}

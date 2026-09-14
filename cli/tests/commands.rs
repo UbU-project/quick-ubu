@@ -26,6 +26,187 @@ fn quick_ubu_with_input(store: &Path, command: &str, input: &str) -> Output {
     test_support::run(store, &[command], input)
 }
 
+fn undo_command_fixture(path: &Path) -> Store {
+    assert_success(&quick_ubu(
+        path,
+        &["add", "--title", "Parent", "--duration", "60"],
+    ));
+    let seeded: Store = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let template = seeded.tasks.values().next().unwrap();
+    let mut store = Store::new();
+    store
+        .pending_event_deletions
+        .push("parent-original-event".into());
+    for (n, title) in [(1, "Alpha project"), (2, "Alpine project")] {
+        let mut parent = template.clone();
+        parent.id = Uuid::from_u128(n);
+        parent.title = title.into();
+        parent.detail = Some("Saved clarification".into());
+        parent.tags = vec!["focus".into()];
+        let mut child = parent.clone();
+        child.id = Uuid::from_u128(n + 10);
+        child.title = format!("Child {n}");
+        store.upsert_task(child.clone());
+        store
+            .calendar_links
+            .insert(child.id, format!("child-event-{n}"));
+        store
+            .export_signatures
+            .insert(child.id, format!("child-signature-{n}"));
+        store
+            .decomposition_history
+            .push(ubu_core::DecompositionRecord {
+                id: Uuid::from_u128(n + 100),
+                parent,
+                child_ids: vec![child.id],
+                at: chrono::DateTime::from_timestamp(1_800_000_000 - n as i64, 0).unwrap(),
+            });
+    }
+    store
+}
+
+#[test]
+fn undo_decompose_command_is_offline_defaults_to_latest_and_matches_parent_prefix() {
+    let (_, path) = memory_store();
+    let before = undo_command_fixture(&path);
+    for (prefix, index) in [
+        (None, 1),
+        (Some("ALPHA".to_string()), 0),
+        (Some(Uuid::from_u128(1).simple().to_string()), 0),
+        (Some(Uuid::from_u128(2).to_string()), 1),
+    ] {
+        test_support::seed(&path, &before);
+        let mut args = vec!["undo-decompose"];
+        if let Some(prefix) = &prefix {
+            args.push(prefix);
+        }
+        let output = quick_ubu(&path, &args);
+        assert_success(&output);
+        assert!(output.stderr.is_empty());
+        let record = &before.decomposition_history[index];
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains(&format!(
+            "restored parent: {} ({})",
+            record.parent.title, record.parent.id
+        )));
+        assert!(stdout.contains("removed 1 children"));
+        assert!(stdout.contains("run `export` to sync the calendar"));
+        let after: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after.tasks[&record.parent.id], record.parent);
+        assert!(!after.tasks.contains_key(&record.child_ids[0]));
+        assert!(!after.calendar_links.contains_key(&record.child_ids[0]));
+        assert!(!after.export_signatures.contains_key(&record.child_ids[0]));
+        assert!(!after.calendar_links.contains_key(&record.parent.id));
+        assert_eq!(
+            after.decomposition_history,
+            vec![before.decomposition_history[1 - index].clone()]
+        );
+        assert_eq!(
+            after.pending_event_deletions.len(),
+            before.pending_event_deletions.len() + 1
+        );
+        assert_eq!(
+            after.pending_event_deletions.last(),
+            before.calendar_links.get(&record.child_ids[0])
+        );
+    }
+}
+
+#[test]
+fn undo_decompose_command_errors_are_noops_and_missing_children_report_zero_removed() {
+    use clap::Parser;
+    assert!(matches!(
+        crate::Cli::try_parse_from(["quick-ubu", "undo-decompose"])
+            .unwrap()
+            .command,
+        crate::Command::UndoDecompose { prefix: None }
+    ));
+    assert!(crate::Cli::try_parse_from(["quick-ubu", "undo-decompose", "a", "b"]).is_err());
+    let (_, path) = memory_store();
+    let mut before = undo_command_fixture(&path);
+    test_support::seed(&path, &before);
+    let bytes = fs::read_to_string(&path).unwrap();
+    for prefix in ["does-not-exist", "Al", "00000000"] {
+        let output = quick_ubu(&path, &["undo-decompose", prefix]);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(if prefix == "does-not-exist" {
+            "no decomposition matches"
+        } else {
+            "ambiguous"
+        }));
+        assert_eq!(fs::read_to_string(&path).unwrap(), bytes);
+    }
+    before.tasks.clear();
+    before.calendar_links.clear();
+    before.export_signatures.clear();
+    test_support::seed(&path, &before);
+    let output = quick_ubu(&path, &["undo-decompose"]);
+    assert_success(&output);
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("removed 0 children"));
+    let restored: Store = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        restored.tasks[&before.decomposition_history[1].parent.id],
+        before.decomposition_history[1].parent
+    );
+    assert_eq!(
+        restored.pending_event_deletions,
+        before.pending_event_deletions
+    );
+    test_support::seed(&path, &Store::new());
+    let output = quick_ubu(&path, &["undo-decompose"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("no decomposition to undo"));
+}
+
+#[test]
+fn undo_decompose_saves_once_and_does_not_report_success_when_save_fails() {
+    use crate::persist::StorageBackend;
+    use clap::Parser;
+    struct FailingSave {
+        before: Store,
+        saves: std::cell::Cell<usize>,
+    }
+    impl StorageBackend for FailingSave {
+        fn load(&self) -> Result<Store, String> {
+            Ok(self.before.clone())
+        }
+        fn save(&self, next: &Store) -> Result<(), String> {
+            self.saves.set(self.saves.get() + 1);
+            assert_eq!(
+                next.decomposition_history.len(),
+                self.before.decomposition_history.len() - 1
+            );
+            assert!(next
+                .tasks
+                .contains_key(&self.before.decomposition_history.last().unwrap().parent.id));
+            Err("injected save failure".into())
+        }
+    }
+    let (_, path) = memory_store();
+    let before = undo_command_fixture(&path);
+    let backend = FailingSave {
+        before: before.clone(),
+        saves: std::cell::Cell::new(0),
+    };
+    test_support::take_stdout();
+    assert_eq!(
+        crate::run_with_backend(
+            crate::Cli::try_parse_from(["quick-ubu", "undo-decompose"]).unwrap(),
+            &backend
+        ),
+        Err("injected save failure".into())
+    );
+    assert_eq!(backend.saves.get(), 1);
+    assert_eq!(backend.load().unwrap(), before);
+    assert!(test_support::take_stdout().is_empty());
+}
+
 #[test]
 fn decompose_parses_prefix_model_history_and_fails_before_external_work_for_missing_inputs() {
     use clap::Parser;
