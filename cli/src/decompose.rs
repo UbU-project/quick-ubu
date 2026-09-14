@@ -4,7 +4,8 @@ use chrono::{DateTime, Duration, Utc};
 use ollama_planner::LlmTransport;
 use serde_json::{json, Value};
 use ubu_core::{
-    AfterConstraint, CompletedExample, DecompositionRecord, Id, Provenance, Store, Task, TaskStatus,
+    AfterConstraint, CompletedExample, DecompositionRecord, Id, Provenance, Rewire, RewireKind,
+    Store, Task, TaskStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,11 +299,33 @@ pub fn decompose_task<T: LlmTransport, R: DecompositionReviewer>(
         });
         child_ids.push(id);
     }
+    let last_child = *child_ids.last().expect("validated nonempty proposal");
+    let mut rewires = Vec::new();
+    for task in next.tasks.values_mut() {
+        if task.id == task_id || child_ids.contains(&task.id) {
+            continue;
+        }
+        if replace_blocked_by(&mut task.blocked_by, task_id, last_child) {
+            rewires.push(Rewire {
+                task_id: task.id,
+                kind: RewireKind::BlockedBy,
+            });
+        }
+        for constraint in &mut task.after {
+            if constraint.task_id == task_id {
+                constraint.task_id = last_child;
+                rewires.push(Rewire {
+                    task_id: task.id,
+                    kind: RewireKind::After(constraint.offset),
+                });
+            }
+        }
+    }
     next.decomposition_history.push(DecompositionRecord {
         id: Id::new_v4(),
         parent,
         child_ids: child_ids.clone(),
-        rewires: vec![],
+        rewires,
         at: now,
     });
     if let Some(event_id) = next.calendar_links.remove(&task_id) {
@@ -317,6 +340,22 @@ pub fn decompose_task<T: LlmTransport, R: DecompositionReviewer>(
         child_ids,
         clamped: final_proposal.iter().filter(|p| p.clamped).count(),
     }))
+}
+
+/// Replace a dependency and de-duplicate in place, retaining first-occurrence order.
+/// Lists without the target are untouched.
+fn replace_blocked_by(blocked_by: &mut Vec<Id>, from: Id, to: Id) -> bool {
+    if !blocked_by.contains(&from) {
+        return false;
+    }
+    for id in blocked_by.iter_mut() {
+        if *id == from {
+            *id = to;
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    blocked_by.retain(|id| seen.insert(*id));
+    true
 }
 
 /// Match retired parent IDs (hyphens optional) or case-insensitive title prefixes.
