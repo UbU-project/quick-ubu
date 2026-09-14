@@ -77,10 +77,6 @@ impl StorageBackend for SqliteBackend {
             "SELECT data FROM pending_decisions ORDER BY rowid",
         )?)
         .map_err(|error| format!("invalid SQLite pending_decisions: {error}"))?;
-        // rowid retains insertion order for equal timestamps, unlike random UUIDs.
-        store.log =
-            serde_json::from_value(read_array(&tx, "SELECT data FROM log ORDER BY at, rowid")?)
-                .map_err(|error| format!("invalid SQLite log: {error}"))?;
         store.calendar_links = serde_json::from_value(read_strings(
             &tx,
             "SELECT id, value FROM calendar_links ORDER BY id",
@@ -216,7 +212,6 @@ impl StorageBackend for SqliteBackend {
             }),
         )?;
 
-        append_log_rows(&tx, &store.log)?;
         tx.commit()
             .map_err(|error| format!("failed to commit SQLite save: {error}"))
     }
@@ -499,17 +494,16 @@ mod tests {
             ubu_core::SubTaskProposal { title: "First / 雪".into(), duration_minutes: 1, offset_minutes: 0, clamped: true },
             ubu_core::SubTaskProposal { title: "Second".into(), duration_minutes: 25, offset_minutes: -5, clamped: false },
         ]);
-        // The first two entries share a timestamp; their insertion order is meaningful.
-        for (n, seconds) in [(30, 0), (29, 0), (28, 1)] {
-            store.log.push(LogEntry {
-                id: id(n),
-                at: at + Duration::seconds(seconds),
-                kind: LogEntryKind::Command(CommandKind::Capture {
-                    task: store.tasks[&id(2)].clone(),
-                }),
-            });
-        }
         store
+    }
+
+    fn log_fixture() -> Vec<LogEntry> {
+        let store = populated_store();
+        [(30, 0), (29, 0), (28, 1)].into_iter().map(|(n, seconds)| LogEntry {
+            id: Uuid::from_u128(n),
+            at: Utc.with_ymd_and_hms(2026, 9, 11, 10, 0, 0).unwrap() + Duration::seconds(seconds),
+            kind: LogEntryKind::Command(CommandKind::Capture { task: store.tasks[&Uuid::from_u128(2)].clone() }),
+        }).collect()
     }
 
     #[test]
@@ -725,7 +719,7 @@ mod tests {
         store.decision_history.push(DecisionRecord {
             proposal: store.pending_decisions.last().unwrap().proposal.clone(),
             resolution: Resolution::Rejected,
-            at: store.log[0].at,
+            at: log_fixture()[0].at,
         });
         let sqlite = SqliteBackend::in_memory().unwrap();
         let json = crate::persist::JsonBackend {
@@ -774,10 +768,7 @@ mod tests {
         store.tasks.remove(&Uuid::from_u128(2));
         backend.save(&store).unwrap();
         assert_eq!(backend.load().unwrap(), store);
-        let cleared = Store {
-            log: store.log,
-            ..Store::new()
-        };
+        let cleared = Store::new();
         backend.save(&cleared).unwrap();
         assert_eq!(backend.load().unwrap(), cleared);
     }
@@ -796,76 +787,60 @@ mod tests {
     }
 
     #[test]
-    fn log_appends_without_duplicates_and_never_updates_or_deletes_existing_rows() {
-        let backend = SqliteBackend::in_memory().unwrap();
-        let mut store = populated_store();
-        backend.save(&store).unwrap();
-        let original_rows = log_rows(&backend);
-        let mut entry = store.log.last().unwrap().clone();
-        entry.id = Uuid::from_u128(40);
-        entry.at += Duration::seconds(1);
-        store.log.push(entry);
-        backend.save(&store).unwrap();
-        backend.save(&store).unwrap();
-        assert_eq!(backend.load().unwrap(), store);
-        assert_eq!(&log_rows(&backend)[..3], original_rows);
-        let expected = store.clone();
-        store.log.remove(0);
-        store.log[0].at += Duration::days(10);
-        store.log[0].kind = LogEntryKind::Command(CommandKind::RemoveTask {
-            task_id: Uuid::from_u128(2),
-        });
-        backend.save(&store).unwrap();
-        assert_eq!(backend.load().unwrap(), expected);
-        assert_eq!(&log_rows(&backend)[..3], original_rows);
-    }
-
-    #[test]
-    fn log_load_sorts_by_timestamp_then_stable_insertion_order_and_indexes_at() {
+    fn log_appends_without_duplicates_and_store_saves_never_change_log_rows() {
         let backend = SqliteBackend::in_memory().unwrap();
         let store = populated_store();
-        let mut shuffled = store.clone();
-        shuffled.log.rotate_right(1);
-        backend.save(&shuffled).unwrap();
-        assert_eq!(backend.load().unwrap(), store);
-        let index_columns: Vec<String> = backend
-            .connection
-            .prepare("PRAGMA index_info(log_at)")
-            .unwrap()
-            .query_map([], |row| row.get(2))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(index_columns, ["at"]);
-        assert_eq!(log_rows(&backend)[0].2, store.log[0].at.timestamp());
+        backend.save(&store).unwrap();
+        let mut entries = log_fixture();
+        backend.append_log(&entries).unwrap();
+        let original_rows = log_rows(&backend);
+        let mut entry = entries.last().unwrap().clone();
+        entry.id = Uuid::from_u128(40);
+        entry.at += Duration::seconds(1);
+        backend.append_log(&[entry.clone()]).unwrap();
+        backend.append_log(&[entry]).unwrap();
+        entries[0].at += Duration::days(10);
+        backend.append_log(&entries).unwrap();
+        backend.save(&Store::new()).unwrap();
+        assert_eq!(backend.load().unwrap(), Store::new());
+        assert_eq!(&log_rows(&backend)[..3], original_rows);
+        assert_eq!(log_rows(&backend).len(), 4);
     }
 
     #[test]
-    fn failed_log_insert_rolls_back_all_bounded_rewrites_and_other_log_inserts() {
+    fn stored_log_sorts_by_timestamp_then_insertion_order_and_indexes_at() {
+        let backend = SqliteBackend::in_memory().unwrap();
+        let mut entries = log_fixture();
+        entries.rotate_right(1);
+        backend.append_log(&entries).unwrap();
+        let index_columns: Vec<String> = backend.connection.prepare("PRAGMA index_info(log_at)").unwrap()
+            .query_map([], |row| row.get(2)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(index_columns, ["at"]);
+        let ids: Vec<_> = log_rows(&backend).into_iter().map(|row| row.1).collect();
+        assert_eq!(ids, [30, 29, 28].map(|n| Uuid::from_u128(n).to_string()));
+        assert_eq!(backend.load().unwrap(), Store::new());
+    }
+
+    #[test]
+    fn append_failure_rolls_back_log_and_save_failure_leaves_appended_truth() {
         let backend = SqliteBackend::in_memory().unwrap();
         let original = populated_store();
         backend.save(&original).unwrap();
         backend.connection.execute_batch(
             "CREATE TRIGGER reject_log BEFORE INSERT ON log WHEN NEW.id = '00000000-0000-0000-0000-000000000063' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
         ).unwrap();
-        let mut changed = Store::new();
-        for n in [98, 99] {
-            let mut entry = original.log[0].clone();
-            entry.id = Uuid::from_u128(n);
-            changed.log.push(entry);
-        }
-        assert!(backend
-            .save(&changed)
-            .unwrap_err()
-            .contains("injected failure"));
+        let entries: Vec<_> = [98, 99].into_iter().map(|n| {
+            let mut entry = log_fixture()[0].clone(); entry.id = Uuid::from_u128(n); entry
+        }).collect();
+        assert!(backend.append_log(&entries).unwrap_err().contains("injected failure"));
+        assert!(log_rows(&backend).is_empty());
         assert_eq!(backend.load().unwrap(), original);
-        backend
-            .connection
-            .execute_batch("DROP TRIGGER reject_log")
-            .unwrap();
-        backend.save(&changed).unwrap();
-        assert!(backend.load().unwrap().tasks.is_empty());
-        assert_eq!(backend.load().unwrap().log.len(), original.log.len() + 2);
+        backend.connection.execute_batch("DROP TRIGGER reject_log").unwrap();
+        backend.append_log(&entries).unwrap();
+        backend.connection.execute_batch("CREATE TRIGGER reject_save BEFORE DELETE ON tasks BEGIN SELECT RAISE(ABORT, 'save failure'); END;").unwrap();
+        assert!(backend.save(&Store::new()).unwrap_err().contains("save failure"));
+        assert_eq!(backend.load().unwrap(), original);
+        assert_eq!(log_rows(&backend).len(), 2);
     }
 
     #[test]

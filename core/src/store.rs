@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::decision::{DecisionRecord, PendingDecision};
 use crate::routine::RoutineTemplate;
-use crate::types::{Bundle, ClarifyState, CoreError, DecompositionRecord, Id, LogEntry, Objective, Preference, SubTaskProposal, Task};
+use crate::types::{Bundle, ClarifyState, CoreError, DecompositionRecord, Id, Objective, Preference, SubTaskProposal, Task};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Store {
@@ -46,8 +46,6 @@ pub struct Store {
     pub pending_decompositions: BTreeMap<Id, Vec<SubTaskProposal>>,
     #[serde(default)]
     pub pending_event_deletions: Vec<String>,
-    /// append-only SessionLog
-    pub log: Vec<LogEntry>,
 }
 
 impl Store {
@@ -133,14 +131,6 @@ impl Store {
 
     pub fn set_category_color(&mut self, category: String, color_id: String) {
         self.category_colors.insert(category, color_id);
-    }
-
-    pub fn append_log(&mut self, entry: LogEntry) {
-        self.log.push(entry);
-    }
-
-    pub fn log(&self) -> &[LogEntry] {
-        &self.log
     }
 
     /// Referential integrity only: every `blocked_by`, `objective_ids`, bundle

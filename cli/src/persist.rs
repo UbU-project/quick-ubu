@@ -12,8 +12,6 @@ use ubu_core::{CompletionFact, Id, LogEntry, Store};
 mod sqlite;
 pub use sqlite::SqliteBackend;
 
-// The new queried-log methods are additive; application callers move in QL-2.
-#[allow(dead_code)]
 pub trait StorageBackend {
     fn load(&self) -> Result<Store, String>;
     fn save(&self, store: &Store) -> Result<(), String>;
@@ -38,6 +36,25 @@ pub struct JsonBackend {
     pub path: PathBuf,
 }
 
+impl JsonBackend {
+    // Keep the log separate so loading/saving Store never reads historical rows.
+    fn log_path(&self) -> PathBuf {
+        let mut path = self.path.as_os_str().to_os_string();
+        path.push(".log.json");
+        PathBuf::from(path)
+    }
+
+    fn load_log(&self) -> Result<Vec<LogEntry>, String> {
+        let path = self.log_path();
+        match fs::read_to_string(&path) {
+            Ok(contents) => serde_json::from_str(&contents)
+                .map_err(|error| format!("failed to parse {}: {error}", path.display())),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(format!("failed to read {}: {error}", path.display())),
+        }
+    }
+}
+
 impl StorageBackend for JsonBackend {
     fn load(&self) -> Result<Store, String> {
         load(&self.path)
@@ -48,14 +65,14 @@ impl StorageBackend for JsonBackend {
     }
 
     fn append_log(&self, entries: &[LogEntry]) -> Result<(), String> {
-        let mut store = self.load()?;
-        let mut ids: std::collections::BTreeSet<_> = store.log.iter().map(|entry| entry.id).collect();
+        let mut log = self.load_log()?;
+        let mut ids: std::collections::BTreeSet<_> = log.iter().map(|entry| entry.id).collect();
         for entry in entries {
             if ids.insert(entry.id) {
-                store.log.push(entry.clone());
+                log.push(entry.clone());
             }
         }
-        self.save(&store)
+        save_json(&self.log_path(), &log)
     }
 
     fn completions_in_window(
@@ -63,14 +80,14 @@ impl StorageBackend for JsonBackend {
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> Result<Vec<CompletionFact>, String> {
-        Ok(json_completions(self.load()?)
+        Ok(json_completions(&self.load_log()?)
             .into_iter()
             .filter(|fact| from <= fact.at && fact.at < to)
             .collect())
     }
 
     fn recent_completions(&self, limit: usize) -> Result<Vec<CompletionFact>, String> {
-        Ok(json_completions(self.load()?)
+        Ok(json_completions(&self.load_log()?)
             .into_iter()
             .rev()
             .take(limit)
@@ -78,10 +95,10 @@ impl StorageBackend for JsonBackend {
     }
 }
 
-fn json_completions(store: Store) -> Vec<CompletionFact> {
+fn json_completions(log: &[LogEntry]) -> Vec<CompletionFact> {
     // Match SQLite's first-write-wins IDs, including duplicate IDs in legacy JSON.
     let mut ids = std::collections::BTreeSet::new();
-    let mut completions: Vec<_> = store.log.iter()
+    let mut completions: Vec<_> = log.iter()
         .filter(|entry| ids.insert(entry.id))
         .filter_map(completion_fact)
         .collect();
@@ -104,6 +121,10 @@ pub fn load(path: &Path) -> Result<Store, String> {
 
 #[allow(dead_code)]
 pub fn save(path: &Path, store: &Store) -> Result<(), String> {
+    save_json(path, store)
+}
+
+fn save_json(path: &Path, value: &impl serde::Serialize) -> Result<(), String> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -113,7 +134,7 @@ pub fn save(path: &Path, store: &Store) -> Result<(), String> {
     }
 
     let temp_path = temp_sibling(path);
-    let contents = match serde_json::to_string_pretty(store) {
+    let contents = match serde_json::to_string_pretty(value) {
         Ok(contents) => contents,
         Err(error) => {
             let _ = fs::remove_file(&temp_path);
