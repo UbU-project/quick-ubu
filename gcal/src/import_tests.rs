@@ -43,12 +43,13 @@ async fn confirmed_deleted_pinned_instance_is_removed_without_changing_its_routi
     assert_eq!(fetched.deleted, vec![task_id]);
     assert_eq!(*transport.get_calls.borrow(), vec!["pinned"]);
     assert!(store.tasks.contains_key(&task_id)); // Fetch does not mutate the store.
-    let report = import_from_calendar(
+    let (report, _entries) = import_from_calendar(
         &mut store,
         &fetched.events,
         &fetched.deleted,
         at(0),
         Tier::UserShared,
+        &BTreeMap::new(),
         &BTreeMap::new(),
     );
     assert_eq!(report.removed, 1);
@@ -56,12 +57,12 @@ async fn confirmed_deleted_pinned_instance_is_removed_without_changing_its_routi
     assert!(!store.calendar_links.contains_key(&task_id));
     assert!(!store.export_signatures.contains_key(&task_id));
     assert_eq!(store.routines[&routine.id], routine);
-    assert_eq!(store.log.len(), 1);
+    assert_eq!(_entries.len(), 1);
     assert_eq!(
-        store.log[0].kind,
+        _entries[0].kind,
         LogEntryKind::Command(ubu_core::CommandKind::RemoveTask { task_id })
     );
-    assert_eq!(store.log[0].at, at(0));
+    assert_eq!(_entries[0].at, at(0));
     let generated =
         ubu_core::generate_routine_tasks(&mut store, at(0).date_naive(), 1, ubu_core::Tz::UTC);
     assert_eq!(generated.created, 1);
@@ -80,12 +81,13 @@ async fn confirmed_deleted_dynamic_task_is_removed_and_reimport_is_a_noop() {
         .unwrap();
     assert_eq!(fetched.deleted, vec![id(1)]);
     assert_eq!(*transport.get_calls.borrow(), vec!["dynamic"]);
-    let report = import_from_calendar(
+    let (report, _entries) = import_from_calendar(
         &mut store,
         &fetched.events,
         &fetched.deleted,
         at(0),
         Tier::UserShared,
+        &BTreeMap::new(),
         &BTreeMap::new(),
     );
     assert_eq!(report.removed, 1);
@@ -95,15 +97,16 @@ async fn confirmed_deleted_dynamic_task_is_removed_and_reimport_is_a_noop() {
             && store.export_signatures.is_empty()
     );
     assert!(
-        matches!(store.log[0].kind, LogEntryKind::Command(ubu_core::CommandKind::RemoveTask { task_id }) if task_id == id(1))
+        matches!(_entries[0].kind, LogEntryKind::Command(ubu_core::CommandKind::RemoveTask { task_id }) if task_id == id(1))
     );
     let removed = store.clone();
-    let report = import_from_calendar(
+    let (report, _entries) = import_from_calendar(
         &mut store,
         &[],
         &fetched.deleted,
         at(1),
         Tier::UserShared,
+        &BTreeMap::new(),
         &BTreeMap::new(),
     );
     assert_eq!(report.removed, 0);
@@ -134,12 +137,13 @@ async fn list_absence_with_a_successful_per_id_fetch_processes_moved_tasks_witho
         assert!(fetched.deleted.is_empty());
         assert_eq!(fetched.events, vec![event.clone()]);
         assert_eq!(*transport.get_calls.borrow(), vec!["moved"]);
-        let report = import_from_calendar(
+        let (report, _entries) = import_from_calendar(
             &mut store,
             &fetched.events,
             &fetched.deleted,
             at(0),
             Tier::UserShared,
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
         assert_eq!(report.removed, 0);
@@ -188,9 +192,10 @@ async fn deletion_detection_skips_done_tasks_and_links_without_tasks() {
             &fetched.deleted,
             at(0),
             Tier::UserShared,
-            &BTreeMap::new()
+            &BTreeMap::new(),
+            &BTreeMap::new(),
         )
-        .removed,
+        .0.removed,
         0
     );
     assert_eq!(store, before);
@@ -199,27 +204,31 @@ async fn deletion_detection_skips_done_tasks_and_links_without_tasks() {
 #[test]
 fn duplicate_deleted_ids_produce_one_removal_and_unknown_ids_are_ignored() {
     let mut store = linked_store();
-    let report = import_from_calendar(
+    let (report, _entries) = import_from_calendar(
         &mut store,
         &[],
         &[id(1), id(1), id(99)],
         at(0),
         Tier::UserShared,
         &BTreeMap::new(),
+        &BTreeMap::new(),
     );
     assert_eq!(report.removed, 1);
-    assert_eq!(store.log.len(), 1);
+    assert_eq!(_entries.len(), 1);
 }
 
-fn import(store: &mut Store, event: &FetchedEvent, now: DateTime<Utc>) -> ImportReport {
-    import_from_calendar(
-        store,
-        std::slice::from_ref(event),
-        &[],
-        now,
-        Tier::UserShared,
-        &BTreeMap::new(),
-    )
+fn import(store: &mut Store, log: &mut Vec<LogEntry>, event: &FetchedEvent, now: DateTime<Utc>) -> ImportReport {
+    let mut actuals = BTreeMap::new();
+    let mut ordered: Vec<_> = log.iter().enumerate().collect();
+    ordered.sort_by_key(|(index, entry)| (entry.at, *index));
+    for (_, entry) in ordered {
+        if let LogEntryKind::Fact(FactKind::Actual { item_id, .. }) = &entry.kind {
+            actuals.insert(*item_id, entry.clone());
+        }
+    }
+    let (report, _entries) = import_from_calendar(store, std::slice::from_ref(event), &[], now, Tier::UserShared, &BTreeMap::new(), &actuals);
+    log.extend(_entries);
+    report
 }
 
 #[test]
@@ -273,19 +282,20 @@ async fn linked_unfinished_events_are_imported_regardless_of_date() {
             .events;
         assert_eq!(events, vec![event.clone()]);
         assert_eq!(*transport.get_calls.borrow(), vec!["dynamic"]);
-        let report = import_from_calendar(
+        let (report, _entries) = import_from_calendar(
             &mut store,
             &events,
             &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
         assert_eq!(report.completed, 1);
         assert_eq!(report.captured, 0);
         assert_eq!(store.tasks[&id(1)].status, TaskStatus::Done);
         assert!(
-            matches!(&store.log[0].kind, LogEntryKind::Fact(FactKind::Actual {
+            matches!(&_entries[0].kind, LogEntryKind::Fact(FactKind::Actual {
             status: ActualStatus::Done, actual: Some(window), ..
         }) if window.start == event.start && window.end == event.end)
         );
@@ -336,12 +346,13 @@ async fn import_discovers_unlinked_events_beyond_the_old_seven_day_window() {
         .unwrap()
         .events;
     assert_eq!(events, vec![upcoming]);
-    let report = import_from_calendar(
+    let (report, _entries) = import_from_calendar(
         &mut store,
         &events,
         &[],
         at(0),
         Tier::UserShared,
+        &BTreeMap::new(),
         &BTreeMap::new(),
     );
     assert_eq!(report.captured, 1);
@@ -409,26 +420,26 @@ async fn linked_fetch_failure_leaves_the_store_unchanged() {
 #[test]
 fn repeated_import_after_recolor_and_resize_preserves_duration_repairs() {
     let mut store = linked_store();
+    let mut log = Vec::new();
     let mut event = fetched_event("dynamic", "Dynamic", Some("8"), -120, -30);
-    assert_eq!(import(&mut store, &event, at(0)).completed, 1);
+    assert_eq!(import(&mut store, &mut log, &event, at(0)).completed, 1);
     // Preserve the existing second-pass estimate repair, as requested.
-    let second = import(&mut store, &event, at(1));
+    let second = import(&mut store, &mut log, &event, at(1));
     assert_eq!(second.completed, 0);
     assert_eq!(second.resized, 1);
     assert_eq!(store.tasks[&id(1)].est_duration, Duration::minutes(90));
     let unchanged = store.clone();
-    assert_eq!(import(&mut store, &event, at(2)).resized, 0);
+    assert_eq!(import(&mut store, &mut log, &event, at(2)).resized, 0);
     assert_eq!(store, unchanged);
 
     event.color_id = Some("5".into());
     event.start = at(-150);
     event.end = at(-20);
-    assert_eq!(import(&mut store, &event, at(3)).resized, 1);
+    assert_eq!(import(&mut store, &mut log, &event, at(3)).resized, 1);
     assert_eq!(store.tasks[&id(1)].est_duration, Duration::minutes(130));
     assert_eq!(store.tasks[&id(1)].status, TaskStatus::Done);
     assert_eq!(
-        store
-            .log
+        log
             .iter()
             .filter(|entry| matches!(
                 entry.kind,
@@ -441,38 +452,42 @@ fn repeated_import_after_recolor_and_resize_preserves_duration_repairs() {
         1
     );
     let unchanged = store.clone();
-    import(&mut store, &event, at(4));
+    import(&mut store, &mut log, &event, at(4));
     assert_eq!(store, unchanged);
 }
 
 #[test]
 fn removing_color_reopens_recent_calendar_completion_and_retracts_its_report() {
     let mut store = linked_store();
+    let mut log = Vec::new();
     let mut event = fetched_event("dynamic", "Dynamic", Some("8"), -60, -30);
     let original = store.clone();
-    import(&mut store, &event, at(0));
+    import(&mut store, &mut log, &event, at(0));
     store
         .export_signatures
         .insert(id(1), "old signature".into());
     event.color_id = None;
-    let report = import(&mut store, &event, at(1));
+    let report = import(&mut store, &mut log, &event, at(1));
     assert_eq!(report.reopened, 1);
     assert_eq!(store.tasks[&id(1)].status, TaskStatus::Backlog);
     assert!(!store.export_signatures.contains_key(&id(1)));
-    assert!(ubu_core::report_by_category(&store, at(0), at(0)).is_empty());
+    assert!(matches!(log.last().unwrap().kind, LogEntryKind::Command(ubu_core::CommandKind::UndoCompletion { completion_id, .. }) if completion_id == log[0].id));
     let unchanged = store.clone();
-    assert_eq!(import(&mut store, &event, at(2)).reopened, 0);
+    assert_eq!(import(&mut store, &mut log, &event, at(2)).reopened, 0);
     assert_eq!(store, unchanged);
     let mut replayed = original;
-    reconcile(&mut replayed, &store.log).unwrap();
+    reconcile(&mut replayed, &log).unwrap();
     assert_eq!(replayed.tasks, store.tasks);
 
     // Correct the time and re-complete. Only the replacement completion counts.
     event.color_id = Some("5".into());
     event.start = at(-90);
-    assert_eq!(import(&mut store, &event, at(3)).completed, 1);
+    assert_eq!(import(&mut store, &mut log, &event, at(3)).completed, 1);
     assert_eq!(
-        ubu_core::report_by_category(&store, at(0), at(3))["(uncategorized)"],
+        match &log.last().unwrap().kind {
+            LogEntryKind::Fact(FactKind::Actual { actual: Some(window), .. }) => window.end - window.start,
+            _ => panic!("expected replacement completion"),
+        },
         Duration::minutes(60)
     );
 }
@@ -481,16 +496,18 @@ fn removing_color_reopens_recent_calendar_completion_and_retracts_its_report() {
 fn undo_uses_the_event_end_time_and_does_not_undo_cli_done() {
     for (end, expected) in [(-1439, 1), (-1440, 0), (-1441, 0), (30, 1)] {
         let mut store = linked_store();
+    let mut log = Vec::new();
         let mut event = fetched_event("dynamic", "Dynamic", Some("8"), end - 30, end);
-        import(&mut store, &event, at(-1));
+        import(&mut store, &mut log, &event, at(-1));
         event.color_id = None;
-        assert_eq!(import(&mut store, &event, at(0)).reopened, expected);
+        assert_eq!(import(&mut store, &mut log, &event, at(0)).reopened, expected);
     }
     let mut store = linked_store();
+    let mut log = Vec::new();
     store.tasks.get_mut(&id(1)).unwrap().status = TaskStatus::Done;
-    store.append_log(log_actual(id(1), ActualStatus::Done, None, at(-1)));
+    log.push(log_actual(id(1), ActualStatus::Done, None, at(-1)));
     let event = fetched_event("dynamic", "Dynamic", None, -60, -30);
-    assert_eq!(import(&mut store, &event, at(0)).reopened, 0);
+    assert_eq!(import(&mut store, &mut log, &event, at(0)).reopened, 0);
     assert_eq!(store.tasks[&id(1)].status, TaskStatus::Done);
 }
 
@@ -557,12 +574,13 @@ async fn import_skips_untimed_events_and_continues_through_pages() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].id, "dynamic");
     let mut store = linked_store();
-    let report = import_from_calendar(
+    let (report, _entries) = import_from_calendar(
         &mut store,
         &events,
         &[],
         at(0),
         Tier::UserShared,
+        &BTreeMap::new(),
         &BTreeMap::new(),
     );
     assert_eq!(report.captured, 0);
@@ -671,12 +689,13 @@ async fn pagination_imports_completion_on_a_later_page_even_after_an_empty_page(
         );
     }
     let mut store = linked_store();
-    let report = import_from_calendar(
+    let (report, _entries) = import_from_calendar(
         &mut store,
         &events,
         &[],
         at(0),
         Tier::UserShared,
+        &BTreeMap::new(),
         &BTreeMap::new(),
     );
     assert_eq!(report.completed, 1);

@@ -2,11 +2,11 @@ use std::fs;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{Map, Value};
 use ubu_core::{CompletionFact, LogEntry, Store};
 
-use super::{completion_fact, StorageBackend};
+use super::{actual_item_id, completion_fact, undone_completion, StorageBackend};
 
 pub struct SqliteBackend {
     connection: Connection,
@@ -32,8 +32,14 @@ impl SqliteBackend {
     }
 
     fn initialize(connection: Connection) -> Result<Self, String> {
-        connection.execute_batch(
-            "BEGIN;
+        let tx = connection.unchecked_transaction()
+            .map_err(|error| format!("failed to begin SQLite initialization: {error}"))?;
+        let indexed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'log_actuals')",
+            [], |row| row.get(0),
+        ).map_err(|error| format!("failed to inspect SQLite log metadata: {error}"))?;
+        tx.execute_batch(
+            "
              CREATE TABLE IF NOT EXISTS log (id TEXT PRIMARY KEY, at INTEGER NOT NULL, data TEXT NOT NULL,
                  item_id TEXT, is_completion INTEGER NOT NULL DEFAULT 0);
              CREATE INDEX IF NOT EXISTS log_at ON log(at);
@@ -47,8 +53,25 @@ impl SqliteBackend {
              CREATE TABLE IF NOT EXISTS export_signatures (id TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS category_colors (category TEXT PRIMARY KEY, color TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS singletons (key TEXT PRIMARY KEY, data TEXT NOT NULL);
-             COMMIT;"
+             CREATE TABLE IF NOT EXISTS log_actuals (
+                 log_id TEXT PRIMARY KEY, item_id TEXT NOT NULL, at INTEGER NOT NULL, nanos INTEGER NOT NULL);
+             CREATE INDEX IF NOT EXISTS idx_log_actual ON log_actuals(item_id, at, nanos);
+             CREATE TABLE IF NOT EXISTS log_completion_undos (
+                 task_id TEXT NOT NULL, completion_id TEXT NOT NULL, PRIMARY KEY(task_id, completion_id));"
         ).map_err(|error| format!("failed to initialize SQLite store: {error}"))?;
+        if !indexed {
+            // Upgrade QL-1 query metadata once, one row at a time. Store is never replayed.
+            let mut statement = tx.prepare("SELECT data FROM log ORDER BY rowid")
+                .map_err(|error| format!("failed to prepare log metadata backfill: {error}"))?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| format!("failed to read log metadata backfill: {error}"))?;
+            for row in rows {
+                let entry: LogEntry = serde_json::from_str(&row.map_err(|error| error.to_string())?)
+                    .map_err(|error| format!("invalid log metadata backfill entry: {error}"))?;
+                write_log_metadata(&tx, &entry)?;
+            }
+        }
+        tx.commit().map_err(|error| format!("failed to commit SQLite initialization: {error}"))?;
         Ok(Self { connection })
     }
 }
@@ -223,20 +246,29 @@ impl StorageBackend for SqliteBackend {
         tx.commit().map_err(|error| format!("failed to commit SQLite log append: {error}"))
     }
 
+    fn latest_actual(&self, task_id: ubu_core::Id) -> Result<Option<LogEntry>, String> {
+        let data: Option<String> = self.connection.query_row(
+            "SELECT log.data FROM log_actuals a JOIN log ON log.id = a.log_id WHERE a.item_id = ?1 ORDER BY a.at DESC, a.nanos DESC, a.rowid DESC LIMIT 1",
+            [task_id.to_string()], |row| row.get(0),
+        ).optional().map_err(|error| format!("failed to query latest SQLite actual: {error}"))?;
+        data.map(|data| serde_json::from_str(&data)
+            .map_err(|error| format!("invalid SQLite actual entry: {error}"))).transpose()
+    }
+
     fn completions_in_window(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CompletionFact>, String> {
         if from >= to { return Ok(vec![]); }
         // The existing index stores seconds. Widen the upper bound when needed,
         // then enforce exact subsecond boundaries using the retained JSON timestamp.
         let end = to.timestamp() + i64::from(to.timestamp_subsec_nanos() != 0);
         let completions = read_completions(&self.connection,
-            "SELECT data FROM log WHERE is_completion = 1 AND at >= ?1 AND at < ?2 ORDER BY at, rowid",
+            "SELECT data FROM log WHERE is_completion = 1 AND NOT EXISTS (SELECT 1 FROM log_completion_undos u WHERE u.task_id = log.item_id AND u.completion_id = log.id) AND at >= ?1 AND at < ?2 ORDER BY at, rowid",
             params![from.timestamp(), end])?;
         Ok(completions.into_iter().filter(|fact| from <= fact.at && fact.at < to).collect())
     }
 
     fn recent_completions(&self, limit: usize) -> Result<Vec<CompletionFact>, String> {
         read_completions(&self.connection,
-            "SELECT data FROM log WHERE is_completion = 1 ORDER BY at DESC, rowid DESC LIMIT ?1",
+            "SELECT data FROM log WHERE is_completion = 1 AND NOT EXISTS (SELECT 1 FROM log_completion_undos u WHERE u.task_id = log.item_id AND u.completion_id = log.id) ORDER BY at DESC, rowid DESC LIMIT ?1",
             [i64::try_from(limit).unwrap_or(i64::MAX)])
     }
 }
@@ -248,8 +280,23 @@ fn append_log_rows(connection: &Connection, entries: &[LogEntry]) -> Result<(), 
     for entry in entries {
         let data = serde_json::to_string(entry).map_err(|error| format!("failed to serialize log: {error}"))?;
         let item_id = completion_fact(entry).map(|fact| fact.item_id.to_string());
-        insert.execute(params![entry.id.to_string(), entry.at.timestamp(), data, item_id, i64::from(item_id.is_some())])
+        let inserted = insert.execute(params![entry.id.to_string(), entry.at.timestamp(), data, item_id, i64::from(item_id.is_some())])
             .map_err(|error| format!("failed to append SQLite log: {error}"))?;
+        if inserted != 0 { write_log_metadata(connection, entry)?; }
+    }
+    Ok(())
+}
+
+fn write_log_metadata(connection: &Connection, entry: &LogEntry) -> Result<(), String> {
+    if let Some(item_id) = actual_item_id(entry) {
+        connection.execute("INSERT OR IGNORE INTO log_actuals(log_id, item_id, at, nanos) VALUES (?1, ?2, ?3, ?4)",
+            params![entry.id.to_string(), item_id.to_string(), entry.at.timestamp(), entry.at.timestamp_subsec_nanos()])
+            .map_err(|error| format!("failed to index SQLite actual: {error}"))?;
+    }
+    if let Some((task_id, completion_id)) = undone_completion(entry) {
+        connection.execute("INSERT OR IGNORE INTO log_completion_undos(task_id, completion_id) VALUES (?1, ?2)",
+            params![task_id.to_string(), completion_id.to_string()])
+            .map_err(|error| format!("failed to index SQLite completion undo: {error}"))?;
     }
     Ok(())
 }
@@ -359,7 +406,7 @@ mod tests {
     };
     use uuid::Uuid;
 
-    fn populated_store() -> Store {
+    pub(super) fn populated_store() -> Store {
         let id = Uuid::from_u128;
         let at = Utc.with_ymd_and_hms(2026, 9, 11, 10, 0, 0).unwrap();
         let mut store = Store::new();
@@ -773,7 +820,7 @@ mod tests {
         assert_eq!(backend.load().unwrap(), cleared);
     }
 
-    fn log_rows(backend: &SqliteBackend) -> Vec<(i64, String, i64, String)> {
+    pub(super) fn log_rows(backend: &SqliteBackend) -> Vec<(i64, String, i64, String)> {
         backend
             .connection
             .prepare("SELECT rowid, id, at, data FROM log ORDER BY at, rowid")

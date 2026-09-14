@@ -7,7 +7,7 @@ use chrono::{DateTime, Duration, Months, Utc};
 use serde::{Deserialize, Serialize};
 use ubu_core::{
     log_actual, log_capture, log_edit_duration, log_edit_pin, log_remove_task, log_undo_completion,
-    reconcile, visible_as_content, ActualStatus, DeferPolicy, FactKind, Id, LogEntryKind, Plan,
+    reconcile, visible_as_content, ActualStatus, DeferPolicy, FactKind, Id, LogEntry, LogEntryKind, Plan,
     Provenance, Store, Task, TaskStatus, Tier, TimeWindow,
 };
 use yup_oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};
@@ -683,7 +683,8 @@ pub fn import_from_calendar(
     now: DateTime<Utc>,
     captured_tier: Tier,
     color_to_category: &BTreeMap<String, String>,
-) -> ImportReport {
+    latest_actuals: &BTreeMap<Id, LogEntry>,
+) -> (ImportReport, Vec<LogEntry>) {
     let event_to_task: BTreeMap<String, Id> = store
         .calendar_links
         .iter()
@@ -720,9 +721,7 @@ pub fn import_from_calendar(
                     {
                         // Only undo a Calendar completion (which records an
                         // actual window), not a CLI `done` fact with no window.
-                        let latest_actual = store.log.iter().enumerate().filter(|(_, entry)| {
-                            matches!(&entry.kind, LogEntryKind::Fact(FactKind::Actual { item_id, .. }) if *item_id == task_id)
-                        }).max_by_key(|(index, entry)| (entry.at, *index)).map(|(_, entry)| entry);
+                        let latest_actual = latest_actuals.get(&task_id);
                         if let Some(completion) = latest_actual.filter(|entry| {
                             matches!(
                                 entry.kind,
@@ -809,9 +808,7 @@ pub fn import_from_calendar(
     for (task_id, event_id) in captured_links {
         store.upsert_calendar_link(task_id, event_id);
     }
-    store.log.extend(entries);
-
-    report
+    (report, entries)
 }
 
 #[cfg(test)]
@@ -1082,7 +1079,7 @@ mod stub_tests {
     }
 
     #[tokio::test]
-    async fn export_keeps_failed_deletions_for_retry_and_cleans_up_without_plan_entries() {
+    async fn export_keeps_failed_deletions_for_retry_and_cleans_up_without_planentries() {
         let mut store = Store::new();
         store.pending_event_deletions = vec!["parent".into(), "later".into()];
         store.upsert_task(task(1, "Child", Tier::UserShared, false, None));
@@ -1876,12 +1873,13 @@ mod stub_tests {
         let mut event = fetched_event("transparent-capture", "Available", None, 60, 120);
         event.transparent = true;
 
-        let report = import_from_calendar(
+        let (report, _entries) = import_from_calendar(
             &mut store,
             std::slice::from_ref(&event),
             &[],
             at(0),
             Tier::UserShared,
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
 
@@ -1895,12 +1893,13 @@ mod stub_tests {
         let mut store = Store::new();
         let event = fetched_event("new-dynamic", "Inbox item", None, 60, 90);
 
-        let report = import_from_calendar(
+        let (report, entries) = import_from_calendar(
             &mut store,
             std::slice::from_ref(&event),
             &[],
             at(0),
             Tier::UserShared,
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
 
@@ -1922,7 +1921,7 @@ mod stub_tests {
         assert_eq!(captured.pinned, None);
         assert_eq!(captured.category, None);
         assert_eq!(captured.est_duration, Duration::minutes(30));
-        assert_eq!(store.log.len(), 1);
+        assert_eq!(entries.len(), 1);
     }
 
     #[test]
@@ -1931,13 +1930,14 @@ mod stub_tests {
         let event = fetched_event("new-commitment", "Dinner", Some("5"), 120, 180);
         let colors = BTreeMap::from([("5".to_string(), "relationship".to_string())]);
 
-        let report = import_from_calendar(
+        let (report, _entries) = import_from_calendar(
             &mut store,
             std::slice::from_ref(&event),
             &[],
             at(0),
             Tier::UserShared,
             &colors,
+            &BTreeMap::new(),
         );
 
         assert_eq!(report.captured, 1);
@@ -1964,18 +1964,19 @@ mod stub_tests {
         store.upsert_calendar_link(task_id, "owned-dynamic".to_string());
         let event = fetched_event("owned-dynamic", "Dynamic", Some("8"), 30, 60);
 
-        let report = import_from_calendar(
+        let (report, entries) = import_from_calendar(
             &mut store,
             &[event],
             &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
 
         assert_eq!(report.completed, 1);
         assert_eq!(store.tasks[&task_id].status, TaskStatus::Done);
-        assert_eq!(store.log.len(), 1);
+        assert_eq!(entries.len(), 1);
     }
 
     #[test]
@@ -1988,19 +1989,20 @@ mod stub_tests {
         store.upsert_calendar_link(task_id, "owned-dynamic".to_string());
         let event = fetched_event("owned-dynamic", "Dynamic", None, 60, 150);
 
-        let report = import_from_calendar(
+        let (report, entries) = import_from_calendar(
             &mut store,
             &[event],
             &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
 
         assert_eq!(report.resized, 1);
         assert_eq!(store.tasks[&task_id].est_duration, Duration::minutes(90));
         assert!(matches!(
-            &store.log[0].kind,
+            &entries[0].kind,
             ubu_core::LogEntryKind::Command(ubu_core::CommandKind::EditDuration {
                 task_id: logged_id,
                 est_duration,
@@ -2038,12 +2040,13 @@ mod stub_tests {
         store.upsert_calendar_link(task_id, "owned-dynamic".to_string());
         let event = fetched_event("owned-dynamic", "Dynamic", Some("8"), 60, 150);
 
-        let report = import_from_calendar(
+        let (report, entries) = import_from_calendar(
             &mut store,
             &[event],
             &[],
             at(0),
             Tier::UserShared,
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
 
@@ -2051,7 +2054,7 @@ mod stub_tests {
         assert_eq!(report.resized, 0);
         assert_eq!(store.tasks[&task_id].status, TaskStatus::Done);
         assert_eq!(store.tasks[&task_id].est_duration, Duration::minutes(30));
-        assert!(store.log.iter().all(|entry| !matches!(
+        assert!(entries.iter().all(|entry| !matches!(
             entry.kind,
             ubu_core::LogEntryKind::Command(ubu_core::CommandKind::EditDuration { .. })
         )));
@@ -2067,18 +2070,19 @@ mod stub_tests {
         store.upsert_calendar_link(task_id, "owned-dynamic".to_string());
         for end_minutes in [60, 30] {
             let event = fetched_event("owned-dynamic", "Dynamic", None, 60, end_minutes);
-            let report = import_from_calendar(
+            let (report, entries) = import_from_calendar(
                 &mut store,
                 &[event],
                 &[],
                 at(0),
                 Tier::UserShared,
                 &BTreeMap::new(),
+                &BTreeMap::new(),
             );
             assert_eq!(report.resized, 0);
+            assert!(entries.is_empty());
         }
         assert_eq!(store.tasks[&task_id].est_duration, Duration::minutes(30));
-        assert!(store.log.is_empty());
     }
 
     #[test]
@@ -2091,18 +2095,19 @@ mod stub_tests {
         store.upsert_calendar_link(task_id, "owned-dynamic".to_string());
         let event = fetched_event("owned-dynamic", "Dynamic", None, 300, 330);
 
-        let report = import_from_calendar(
+        let (report, entries) = import_from_calendar(
             &mut store,
             &[event],
             &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
 
         assert_eq!(report.resized, 0);
         assert_eq!(store.tasks[&task_id].est_duration, Duration::minutes(30));
-        assert!(store.log.is_empty());
+        assert!(entries.is_empty());
     }
 
     #[test]
@@ -2118,19 +2123,20 @@ mod stub_tests {
             end: event.end,
         };
 
-        let report = import_from_calendar(
+        let (report, entries) = import_from_calendar(
             &mut store,
             &[event],
             &[],
             at(0),
             Tier::UserShared,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
 
         assert_eq!(report.moved, 1);
         assert_eq!(store.tasks[&task_id].pinned, Some(expected.clone()));
         assert!(matches!(
-            &store.log[0].kind,
+            &entries[0].kind,
             ubu_core::LogEntryKind::Command(ubu_core::CommandKind::EditPin {
                 task_id: logged_id,
                 pinned: Some(logged_window),
@@ -2161,8 +2167,8 @@ mod stub_tests {
         ];
         let colors = BTreeMap::from([("5".to_string(), "personal".to_string())]);
 
-        let first =
-            import_from_calendar(&mut store, &events, &[], at(0), Tier::UserShared, &colors);
+        let (first, _) =
+            import_from_calendar(&mut store, &events, &[], at(0), Tier::UserShared, &colors, &BTreeMap::new());
         assert_eq!(
             first,
             ImportReport {
@@ -2176,8 +2182,8 @@ mod stub_tests {
         );
         let after_first = store.clone();
 
-        let second =
-            import_from_calendar(&mut store, &events, &[], at(1), Tier::UserShared, &colors);
+        let (second, _) =
+            import_from_calendar(&mut store, &events, &[], at(1), Tier::UserShared, &colors, &BTreeMap::new());
 
         assert_eq!(
             second,

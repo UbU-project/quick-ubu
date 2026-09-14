@@ -651,19 +651,19 @@ pub fn list(store: &Store) -> Vec<TaskRow> {
         .collect()
 }
 
-pub fn done(store: &mut Store, prefix: &str, now: DateTime<Utc>) -> Result<(), String> {
+pub fn done(store: &mut Store, backend: &dyn crate::persist::StorageBackend, prefix: &str, now: DateTime<Utc>) -> Result<(), String> {
     let id = resolve_task_id(store, prefix)?;
+    backend.append_log(&[ubu_core::log_actual(
+        id,
+        ubu_core::ActualStatus::Done,
+        None,
+        now,
+    )])?;
     store
         .tasks
         .get_mut(&id)
         .expect("resolved task id must remain in the store")
         .status = TaskStatus::Done;
-    store.append_log(ubu_core::log_actual(
-        id,
-        ubu_core::ActualStatus::Done,
-        None,
-        now,
-    ));
     Ok(())
 }
 
@@ -1988,13 +1988,15 @@ mod tests {
     fn classifiers_pass_bounded_history_to_stubs_without_indexing_completions() {
         use ubu_core::{recent_completed_examples, ActualStatus, FactKind, LogEntry, LogEntryKind};
 
+        let backend = crate::persist::SqliteBackend::in_memory().unwrap();
+        use crate::persist::StorageBackend;
         let mut store = graph_store();
         let (a, b, _) = graph_ids();
         for (task_id, days) in [(a, 0), (b, 1)] {
             let task = store.tasks.get_mut(&task_id).unwrap();
             task.status = TaskStatus::Done;
             task.tags = vec!["history-tag".into()];
-            store.append_log(LogEntry {
+            backend.append_log(&[LogEntry {
                 id: task_id,
                 at: fixed_time() - Duration::days(days),
                 kind: LogEntryKind::Fact(FactKind::Actual {
@@ -2002,10 +2004,10 @@ mod tests {
                     status: ActualStatus::Done,
                     actual: None,
                 }),
-            });
+            }]).unwrap();
         }
         for limit in [0, 1, 20] {
-            let history = recent_completed_examples(&store, limit);
+            let history = recent_completed_examples(&store, &backend.recent_completions(limit).unwrap());
             assert_eq!(history.len(), limit.min(2));
             let selected = active_ids(&store);
             let before = store.clone();
@@ -2449,34 +2451,30 @@ mod tests {
 
     #[test]
     fn done_sets_status_and_appends_exactly_one_actual_at_injected_now() {
+        use crate::persist::StorageBackend;
+        let backend = crate::persist::SqliteBackend::in_memory().unwrap();
         let mut store = graph_store();
         let (a, b, _) = graph_ids();
         let now = fixed_time();
-        store.append_log(ubu_core::log_defer(b, now - Duration::minutes(1)));
-        let existing_log = store.log.clone();
-        done(&mut store, &prefix(a), now).unwrap();
-        assert_eq!(store.tasks[&a].status, TaskStatus::Done);
-        assert_eq!(store.log.len(), existing_log.len() + 1);
-        assert_eq!(&store.log[..existing_log.len()], existing_log.as_slice());
-        let completion = store.log.last().unwrap();
-        assert_eq!(completion.at, now);
-        assert_eq!(
-            completion.kind,
-            ubu_core::LogEntryKind::Fact(ubu_core::FactKind::Actual {
-                item_id: a,
-                status: ubu_core::ActualStatus::Done,
-                actual: None,
-            })
-        );
+        backend.append_log(&[ubu_core::log_defer(b, now - Duration::minutes(1))]).unwrap();
+        done(&mut store, &backend, &prefix(a), now).unwrap();
+        backend.save(&store).unwrap();
+        assert_eq!(backend.load().unwrap().tasks[&a].status, TaskStatus::Done);
+        let expected = vec![ubu_core::CompletionFact { item_id: a, at: now, actual: None }];
+        assert_eq!(backend.recent_completions(10).unwrap(), expected);
+        assert_eq!(backend.completions_in_window(now, now + Duration::nanoseconds(1)).unwrap(), expected);
     }
 
     #[test]
     fn done_with_unknown_or_ambiguous_prefix_leaves_store_unchanged() {
+        use crate::persist::StorageBackend;
+        let backend = crate::persist::SqliteBackend::in_memory().unwrap();
         let mut store = graph_store();
         let before = store.clone();
         for prefix in ["ffffffff", ""] {
-            assert!(done(&mut store, prefix, fixed_time()).is_err());
+            assert!(done(&mut store, &backend, prefix, fixed_time()).is_err());
             assert_eq!(store, before);
+            assert!(backend.recent_completions(10).unwrap().is_empty());
         }
     }
 

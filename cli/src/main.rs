@@ -472,7 +472,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
             }
         }
         Command::Done { prefix } => {
-            logic::done(&mut store, &prefix, Utc::now())?;
+            logic::done(&mut store, backend, &prefix, Utc::now())?;
             backend.save(&store)?;
         }
         Command::Report(args) => {
@@ -957,14 +957,17 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|error| format!("failed to start async runtime: {error}"))?;
             let fetched = runtime.block_on(fetch_import_events(&store, &transport, &window))?;
-            let report = import_from_calendar(
+            let latest_actuals = persist::calendar_actuals(backend, &store, &fetched.events, now)?;
+            let (report, entries) = import_from_calendar(
                 &mut store,
                 &fetched.events,
                 &fetched.deleted,
                 now,
                 Tier::UserShared,
                 &color_to_category,
+                &latest_actuals,
             );
+            backend.append_log(&entries)?;
             backend.save(&store)?;
             println!(
                 "captured {}, completed {}, reopened {}, moved {}, resized {}, removed {}",
@@ -1423,13 +1426,14 @@ mod tests {
                 .into_iter()
                 .map(|(category, color)| (color, category))
                 .collect();
-            let report = import_from_calendar(
+            let (report, _entries) = import_from_calendar(
                 &mut store,
                 std::slice::from_ref(&event),
                 &[],
                 now,
                 Tier::UserShared,
                 &inverse,
+                &BTreeMap::new(),
             );
             assert_eq!(report.captured, 1);
             let captured = store.tasks.values().next().unwrap();

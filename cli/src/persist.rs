@@ -16,6 +16,8 @@ pub trait StorageBackend {
     fn load(&self) -> Result<Store, String>;
     fn save(&self, store: &Store) -> Result<(), String>;
     fn append_log(&self, entries: &[LogEntry]) -> Result<(), String>;
+    /// Latest Actual fact for one linked task, including its log ID for undo.
+    fn latest_actual(&self, task_id: Id) -> Result<Option<LogEntry>, String>;
     fn completions_in_window(&self, from: DateTime<Utc>, to: DateTime<Utc>)
         -> Result<Vec<CompletionFact>, String>;
     fn recent_completions(&self, limit: usize) -> Result<Vec<CompletionFact>, String>;
@@ -30,12 +32,45 @@ fn completion_fact(entry: &LogEntry) -> Option<CompletionFact> {
     }
 }
 
+fn actual_item_id(entry: &LogEntry) -> Option<Id> {
+    match &entry.kind {
+        ubu_core::LogEntryKind::Fact(ubu_core::FactKind::Actual { item_id, .. }) => Some(*item_id),
+        _ => None,
+    }
+}
+
+fn undone_completion(entry: &LogEntry) -> Option<(Id, Id)> {
+    match &entry.kind {
+        ubu_core::LogEntryKind::Command(ubu_core::CommandKind::UndoCompletion { task_id, completion_id }) => Some((*task_id, *completion_id)),
+        _ => None,
+    }
+}
+
+/// Query only tasks eligible for Calendar's existing 24-hour correction rule.
+/// Storage access stays outside gcal's pure reconciliation function.
+pub(crate) fn calendar_actuals(
+    backend: &dyn StorageBackend, store: &Store, events: &[gcal::FetchedEvent], now: DateTime<Utc>,
+) -> Result<std::collections::BTreeMap<Id, LogEntry>, String> {
+    let candidates: std::collections::BTreeSet<_> = events.iter()
+        .filter(|event| event.color_id.is_none() && event.end > now - chrono::Duration::hours(24))
+        .map(|event| event.id.as_str()).collect();
+    let mut actuals = std::collections::BTreeMap::new();
+    for (task_id, event_id) in &store.calendar_links {
+        if candidates.contains(event_id.as_str()) && store.tasks.get(task_id)
+            .is_some_and(|task| task.pinned.is_none() && task.status == ubu_core::TaskStatus::Done) {
+            if let Some(entry) = backend.latest_actual(*task_id)? { actuals.insert(*task_id, entry); }
+        }
+    }
+    Ok(actuals)
+}
+
 /// Retained JSON backend for compatibility tests and callers of the storage trait.
 #[allow(dead_code)]
 pub struct JsonBackend {
     pub path: PathBuf,
 }
 
+#[allow(dead_code)] // The production CLI selects SQLite; JSON remains a compatibility backend.
 impl JsonBackend {
     // Keep the log separate so loading/saving Store never reads historical rows.
     fn log_path(&self) -> PathBuf {
@@ -72,7 +107,16 @@ impl StorageBackend for JsonBackend {
                 log.push(entry.clone());
             }
         }
-        save_json(&self.log_path(), &log)
+        save_json(&self.log_path(), serde_json::to_string_pretty(&log))
+    }
+
+    fn latest_actual(&self, task_id: Id) -> Result<Option<LogEntry>, String> {
+        let log = self.load_log()?;
+        let mut ids = std::collections::BTreeSet::new();
+        Ok(log.iter().enumerate().filter(|(_, entry)| ids.insert(entry.id))
+            .filter(|(_, entry)| actual_item_id(entry) == Some(task_id))
+            .max_by_key(|(index, entry)| (entry.at, *index))
+            .map(|(_, entry)| entry.clone()))
     }
 
     fn completions_in_window(
@@ -95,13 +139,18 @@ impl StorageBackend for JsonBackend {
     }
 }
 
+#[allow(dead_code)]
 fn json_completions(log: &[LogEntry]) -> Vec<CompletionFact> {
     // Match SQLite's first-write-wins IDs, including duplicate IDs in legacy JSON.
     let mut ids = std::collections::BTreeSet::new();
-    let mut completions: Vec<_> = log.iter()
-        .filter(|entry| ids.insert(entry.id))
-        .filter_map(completion_fact)
-        .collect();
+    let entries: Vec<_> = log.iter().filter(|entry| ids.insert(entry.id)).collect();
+    let undone: std::collections::BTreeSet<_> = entries.iter()
+        .filter_map(|entry| undone_completion(entry)).collect();
+    let mut completions: Vec<_> = entries.into_iter()
+        .filter_map(|entry| {
+            let fact = completion_fact(entry)?;
+            (!undone.contains(&(fact.item_id, entry.id))).then_some(fact)
+        }).collect();
     // SQLite retains whole-second timestamps and uses insertion order for ties.
     completions.sort_by_key(|fact| fact.at.timestamp());
     completions
@@ -121,10 +170,10 @@ pub fn load(path: &Path) -> Result<Store, String> {
 
 #[allow(dead_code)]
 pub fn save(path: &Path, store: &Store) -> Result<(), String> {
-    save_json(path, store)
+    save_json(path, serde_json::to_string_pretty(store))
 }
 
-fn save_json(path: &Path, value: &impl serde::Serialize) -> Result<(), String> {
+fn save_json(path: &Path, contents: Result<String, serde_json::Error>) -> Result<(), String> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -134,7 +183,7 @@ fn save_json(path: &Path, value: &impl serde::Serialize) -> Result<(), String> {
     }
 
     let temp_path = temp_sibling(path);
-    let contents = match serde_json::to_string_pretty(value) {
+    let contents = match contents {
         Ok(contents) => contents,
         Err(error) => {
             let _ = fs::remove_file(&temp_path);

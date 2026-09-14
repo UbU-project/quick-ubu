@@ -121,14 +121,19 @@ impl WatchState {
         // Retry only once a cycle starts. A transient poll-fetch failure alone
         // must not turn an unchanged calendar into a new import/export cycle.
         self.retry_cycle = true;
-        let import = import_from_calendar(
-            store,
+        let latest_actuals = crate::persist::calendar_actuals(backend, store, &fetched.events, now)?;
+        let mut imported = store.clone();
+        let (import, entries) = import_from_calendar(
+            &mut imported,
             &fetched.events,
             &fetched.deleted,
             now,
             Tier::UserShared,
             &config.color_to_category,
+            &latest_actuals,
         );
+        backend.append_log(&entries)?;
+        *store = imported;
         let plan = re_plan(
             store,
             ComputeTarget::DesktopOllama,
@@ -398,6 +403,7 @@ mod tests {
         sqlite: SqliteBackend,
         saves: Cell<usize>,
         fail: Cell<bool>,
+        fail_append: Cell<bool>,
     }
     impl Backend {
         fn new() -> Self {
@@ -405,19 +411,18 @@ mod tests {
                 sqlite: SqliteBackend::in_memory().unwrap(),
                 saves: Cell::new(0),
                 fail: Cell::new(false),
+                fail_append: Cell::new(false),
             }
         }
     }
     impl StorageBackend for Backend {
-        fn append_log(&self, _: &[ubu_core::LogEntry]) -> Result<(), String> {
-            panic!("watch must still use load/save in QL-1")
+        fn append_log(&self, entries: &[ubu_core::LogEntry]) -> Result<(), String> {
+            if self.fail_append.replace(false) { return Err("injected append failure".into()); }
+            self.sqlite.append_log(entries)
         }
-        fn completions_in_window(&self, _: DateTime<Utc>, _: DateTime<Utc>) -> Result<Vec<ubu_core::CompletionFact>, String> {
-            panic!("watch must still use Store.log in QL-1")
-        }
-        fn recent_completions(&self, _: usize) -> Result<Vec<ubu_core::CompletionFact>, String> {
-            panic!("watch must still use Store.log in QL-1")
-        }
+        fn latest_actual(&self, task_id: ubu_core::Id) -> Result<Option<ubu_core::LogEntry>, String> { self.sqlite.latest_actual(task_id) }
+        fn completions_in_window(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<ubu_core::CompletionFact>, String> { self.sqlite.completions_in_window(from, to) }
+        fn recent_completions(&self, limit: usize) -> Result<Vec<ubu_core::CompletionFact>, String> { self.sqlite.recent_completions(limit) }
         fn load(&self) -> Result<Store, String> {
             self.sqlite.load()
         }
@@ -566,12 +571,13 @@ mod tests {
     #[test]
     fn fetch_export_post_fetch_and_save_errors_retry_without_advancing_snapshot() {
         runtime().block_on(async {
-            for failure in ["fetch", "export", "post-fetch", "save"] {
+            for failure in ["fetch", "append", "export", "post-fetch", "save"] {
                 let remote = Calendar::with_event(event("a"));
                 let backend = Backend::new();
                 let mut store = Store::new();
                 match failure {
                     "fetch" => remote.fail_list.set(1),
+                    "append" => backend.fail_append.set(true),
                     "export" => remote.fail_export.set(true),
                     "post-fetch" => remote.fail_list.set(2),
                     _ => backend.fail.set(true),
@@ -585,6 +591,7 @@ mod tests {
                     "{failure}"
                 );
                 assert!(store.poll_snapshot.is_empty());
+                if failure == "append" { assert_eq!(store, Store::new()); }
                 assert_eq!(backend.load().unwrap(), Store::new());
                 assert!(
                     state
