@@ -94,6 +94,13 @@ pub struct TimeWindow {
     pub end: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletionFact {
+    pub item_id: Id,
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub actual: Option<TimeWindow>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObjectiveStatus {
     Active,
