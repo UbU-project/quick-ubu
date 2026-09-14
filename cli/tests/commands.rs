@@ -227,6 +227,7 @@ fn decompose_parses_prefix_model_history_and_fails_before_external_work_for_miss
             prefix,
             model,
             history,
+            ..
         } = crate::Cli::try_parse_from(&args).unwrap().command
         else {
             panic!("expected decompose");

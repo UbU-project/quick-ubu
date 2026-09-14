@@ -138,6 +138,9 @@ enum Command {
     /// Review a proposed sub-task chain in EDITOR and replace its parent on commit.
     Decompose {
         prefix: String,
+        /// Review the stored suggestion without asking the model again.
+        #[arg(long)]
+        review: bool,
         #[arg(long)]
         model: Option<String>,
         #[arg(long, default_value_t = 20)]
@@ -148,6 +151,8 @@ enum Command {
         /// Retired parent ID or title prefix.
         prefix: Option<String>,
     },
+    /// List stored decomposition suggestions awaiting review.
+    DecomposeList,
     /// Run classifiers unattended, saving progress after every chunk.
     Batch {
         #[arg(long, value_enum)]
@@ -636,24 +641,41 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 report.answered, report.finalized, report.queued, report.stopped
             );
         }
-        Command::Decompose { prefix, model, history } => {
+        Command::Decompose { prefix, model, history, review } => {
             let task_id = persist::resolve_task_id(&store, &prefix)?;
-            let model = logic::resolve_model(&store, model)?;
             println!("Decomposing: {} ({task_id})", store.tasks[&task_id].title);
             io::stdout().flush().map_err(|error| format!("flush task selection: {error}"))?;
-            let transport = OllamaHttpTransport {
-                base_url: "http://localhost:11434".into(), model,
-                timeout_secs: 300, total_timeout_secs: 1200,
+            let result = if review {
+                decompose::review_pending_decomposition(
+                    &mut store, task_id, &mut decompose::EditorReviewer,
+                    Utc::now(), &mut |store| backend.save(store),
+                )?
+            } else {
+                let model = logic::resolve_model(&store, model)?;
+                let transport = OllamaHttpTransport {
+                    base_url: "http://localhost:11434".into(), model,
+                    timeout_secs: 300, total_timeout_secs: 1200,
+                };
+                decompose::decompose_task(
+                    &mut store, task_id, &transport, &mut decompose::EditorReviewer,
+                    history, Utc::now(), &mut |store| backend.save(store),
+                )?
             };
-            match decompose::decompose_task(
-                &mut store, task_id, &transport, &mut decompose::EditorReviewer,
-                history, Utc::now(), &mut |store| backend.save(store),
-            )? {
+            match result {
                 Some(summary) => println!(
                     "decomposed {task_id}: created {} sub-tasks, {} duration(s) clamped to the 1-minute floor; calendar cleanup on next export",
                     summary.child_ids.len(), summary.clamped
                 ),
                 None => println!("decomposition aborted; store unchanged"),
+            }
+        }
+        Command::DecomposeList => {
+            if store.pending_decompositions.is_empty() {
+                println!("No pending decomposition suggestions.");
+            }
+            for (id, proposal) in &store.pending_decompositions {
+                let title = store.tasks.get(id).map(|task| task.title.as_str()).unwrap_or("(missing task)");
+                println!("{}  {}  {} sub-tasks", short_id(*id), title, proposal.len());
             }
         }
         Command::UndoDecompose { prefix } => {

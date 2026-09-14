@@ -321,7 +321,38 @@ pub fn decompose_task<T: LlmTransport, R: DecompositionReviewer>(
         &parent,
         &ubu_core::recent_completed_examples(store, history_n),
     );
-    let mut proposal = parse_decompose_response(&transport.generate(&prompt)?)?;
+    let proposal = parse_decompose_response(&transport.generate(&prompt)?)?;
+    review_and_commit(store, task_id, proposal, reviewer, now, save)
+}
+
+pub fn review_pending_decomposition<R: DecompositionReviewer>(
+    store: &mut Store,
+    task_id: Id,
+    reviewer: &mut R,
+    now: DateTime<Utc>,
+    save: &mut dyn FnMut(&Store) -> Result<(), String>,
+) -> Result<Option<DecompositionSummary>, String> {
+    let proposal = store
+        .pending_decompositions
+        .get(&task_id)
+        .cloned()
+        .ok_or_else(|| format!("no pending decomposition for {task_id}"))?;
+    review_and_commit(store, task_id, proposal, reviewer, now, save)
+}
+
+fn review_and_commit<R: DecompositionReviewer>(
+    store: &mut Store,
+    task_id: Id,
+    mut proposal: Vec<SubTaskProposal>,
+    reviewer: &mut R,
+    now: DateTime<Utc>,
+    save: &mut dyn FnMut(&Store) -> Result<(), String>,
+) -> Result<Option<DecompositionSummary>, String> {
+    let parent = store
+        .tasks
+        .get(&task_id)
+        .ok_or_else(|| format!("unknown task {task_id}"))?
+        .clone();
     normalize(&mut proposal)?;
     let Some(mut final_proposal) = reviewer.review(&proposal) else {
         return Ok(None);
@@ -405,6 +436,7 @@ pub fn decompose_task<T: LlmTransport, R: DecompositionReviewer>(
     }
     next.tasks.remove(&task_id);
     next.export_signatures.remove(&task_id);
+    next.pending_decompositions.remove(&task_id);
     // Publish only after the backend's atomic save succeeds.
     save(&next)?;
     *store = next;
