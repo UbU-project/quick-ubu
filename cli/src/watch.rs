@@ -367,6 +367,10 @@ mod tests {
         }
     }
     impl CalendarTransport for Calendar {
+        async fn delete_event(&self, id: &str) -> Result<(), String> {
+            self.events.borrow_mut().remove(id);
+            Ok(())
+        }
         async fn create_event(&self, event: &CalendarEvent) -> Result<String, String> {
             let id = format!("created-{}", self.writes.get());
             self.write(&id, event)?;

@@ -84,6 +84,8 @@ pub trait CalendarTransport {
 
     async fn update_event(&self, event_id: &str, event: &CalendarEvent) -> Result<(), String>;
 
+    async fn delete_event(&self, event_id: &str) -> Result<(), String>;
+
     async fn list_events(
         &self,
         from: DateTime<Utc>,
@@ -244,6 +246,18 @@ impl GoogleCalendarTransport {
         #[cfg(test)]
         {
             self.import_stub.send_import_request(request)
+        }
+    }
+
+    async fn delete_event_with_token(&self, event_id: &str, token: &str) -> Result<(), String> {
+        let response = self
+            .send_import_request(self.client.delete(self.event_url(Some(event_id))).bearer_auth(token))
+            .await
+            .map_err(|error| format!("failed to delete Google Calendar event {event_id}: {error}"))?;
+        match response.status() {
+            status if status.is_success() => Ok(()),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE => Ok(()),
+            _ => Err(response.error().await),
         }
     }
 
@@ -457,6 +471,11 @@ impl TryFrom<ListedEvent> for FetchedEvent {
 }
 
 impl CalendarTransport for GoogleCalendarTransport {
+    async fn delete_event(&self, event_id: &str) -> Result<(), String> {
+        let token = self.access_token().await?;
+        self.delete_event_with_token(event_id, &token).await
+    }
+
     async fn create_event(&self, event: &CalendarEvent) -> Result<String, String> {
         let token = self.access_token().await?;
         let response = self
@@ -588,6 +607,12 @@ pub async fn export_plan<T: CalendarTransport>(
     color_map: &BTreeMap<String, String>,
     calendar_clearance: Tier,
 ) -> Result<ExportReport, String> {
+    // Remove only acknowledged deletions. On failure, retain this ID and all
+    // remaining work for an idempotent retry before creating child events.
+    while let Some(event_id) = store.pending_event_deletions.first().cloned() {
+        transport.delete_event(&event_id).await?;
+        store.pending_event_deletions.remove(0);
+    }
     let mut report = ExportReport {
         created: 0,
         updated: 0,
@@ -792,6 +817,7 @@ pub fn import_from_calendar(
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StubCall {
+    Delete(String),
     Create(CalendarEvent),
     Update {
         event_id: String,
@@ -806,6 +832,7 @@ struct StubTransport {
     next_id: std::cell::Cell<usize>,
     create_error: Option<String>,
     update_error: Option<String>,
+    delete_error: Option<String>,
     listed_events: Vec<FetchedEvent>,
     filter_dates: bool,
     get_calls: std::cell::RefCell<Vec<String>>,
@@ -858,6 +885,14 @@ impl StubTransport {
 
 #[cfg(test)]
 impl CalendarTransport for StubTransport {
+    async fn delete_event(&self, event_id: &str) -> Result<(), String> {
+        self.calls.borrow_mut().push(StubCall::Delete(event_id.into()));
+        match &self.delete_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+
     async fn create_event(&self, event: &CalendarEvent) -> Result<String, String> {
         self.calls
             .borrow_mut()
@@ -1240,6 +1275,7 @@ mod stub_tests {
     fn call_event(call: &StubCall) -> &CalendarEvent {
         match call {
             StubCall::Create(event) | StubCall::Update { event, .. } => event,
+            StubCall::Delete(_) => panic!("expected an event write"),
         }
     }
 
