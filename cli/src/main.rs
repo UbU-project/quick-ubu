@@ -482,7 +482,11 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 args.to.as_deref(),
                 args.days,
             )?;
-            let totals = ubu_core::report_by_category(&store, window.start, window.end);
+            // Reports historically include their exact upper endpoint.
+            let query_end = window.end.checked_add_signed(chrono::Duration::nanoseconds(1))
+                .ok_or("report end is out of range")?;
+            let completions = backend.completions_in_window(window.start, query_end)?;
+            let totals = ubu_core::report_by_category(&store, &completions, window.start, window.end);
             print!("{}", logic::format_category_report(&totals));
         }
         Command::Defer { prefix } => {
@@ -609,7 +613,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 timeout_secs: 300,
                 total_timeout_secs: 1200,
             };
-            let history = ubu_core::recent_completed_examples(&store, history);
+            let history = ubu_core::recent_completed_examples(&store, &backend.recent_completions(history)?);
             let report = clarify::clarify_task(
                 &mut store,
                 task_id,
@@ -656,9 +660,10 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                     base_url: "http://localhost:11434".into(), model,
                     timeout_secs: 300, total_timeout_secs: 1200,
                 };
+                let history = ubu_core::recent_completed_examples(&store, &backend.recent_completions(history)?);
                 decompose::decompose_task(
                     &mut store, task_id, &transport, &mut decompose::EditorReviewer,
-                    history, Utc::now(), &mut |store| backend.save(store),
+                    &history, Utc::now(), &mut |store| backend.save(store),
                 )?
             };
             match result {
@@ -714,13 +719,14 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 timeout_secs: ollama_timeout,
                 total_timeout_secs: ollama_total_timeout,
             };
+            let history = ubu_core::recent_completed_examples(&store, &backend.recent_completions(history)?);
             let outcome = batch::run_batch_operations(
                 &mut store,
                 &transport,
                 batch_operations(only),
                 pass_cap,
                 batch_size.get(),
-                history,
+                &history,
                 round_cap,
                 min_minutes,
                 &interrupted,
@@ -748,7 +754,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 timeout_secs: 300,
                 total_timeout_secs: 1200,
             };
-            let history = ubu_core::recent_completed_examples(&store, history);
+            let history = ubu_core::recent_completed_examples(&store, &backend.recent_completions(history)?);
             let filter = logic::TaskFilter {
                 untagged,
                 category,
@@ -791,7 +797,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 timeout_secs: ollama_timeout,
                 total_timeout_secs: ollama_total_timeout,
             };
-            let history = ubu_core::recent_completed_examples(&store, history);
+            let history = ubu_core::recent_completed_examples(&store, &backend.recent_completions(history)?);
             let filter = logic::TaskFilter {
                 category,
                 tag,

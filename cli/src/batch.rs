@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ollama_planner::LlmTransport;
-use ubu_core::{recent_completed_examples, CompletedExample, Id, Store};
+use ubu_core::{CompletedExample, Id, Store};
 
 use crate::logic::{self, AdviseReport, Proposed, TaskFilter};
 
@@ -118,7 +118,7 @@ pub fn run_batch<T: LlmTransport>(
     ops: &[&str],
     pass_cap: u32,
     batch_size: usize,
-    history_n: usize,
+    history: &[ubu_core::CompletedExample],
     interrupted: &AtomicBool,
     save: &mut dyn FnMut(&Store) -> Result<(), String>,
 ) -> BatchOutcome {
@@ -158,8 +158,7 @@ pub fn run_batch<T: LlmTransport>(
                 .collect();
             for chunk in eligible.chunks(batch_size) {
                 check_interrupt(store, interrupted, save)?;
-                let history = recent_completed_examples(store, history_n);
-                let (prompt, ids) = (op.prompt_builder)(store, chunk, &history);
+                let (prompt, ids) = (op.prompt_builder)(store, chunk, history);
                 log_model_tasks(store, op.name, &ids, summary.tasks, eligible.len())?;
                 match transport
                     .generate(&prompt)
@@ -211,7 +210,7 @@ pub fn run_batch_operations<T: LlmTransport>(
     ops: &[&str],
     pass_cap: u32,
     batch_size: usize,
-    history_n: usize,
+    history: &[ubu_core::CompletedExample],
     round_cap: u32,
     min_minutes: u32,
     interrupted: &AtomicBool,
@@ -231,7 +230,7 @@ pub fn run_batch_operations<T: LlmTransport>(
                 store,
                 transport,
                 round_cap,
-                history_n,
+                history,
                 interrupted,
                 save,
             )
@@ -241,7 +240,7 @@ pub fn run_batch_operations<T: LlmTransport>(
                 transport,
                 pass_cap,
                 min_minutes,
-                history_n,
+                history,
                 interrupted,
                 save,
             )
@@ -252,7 +251,7 @@ pub fn run_batch_operations<T: LlmTransport>(
                 &[*op],
                 pass_cap,
                 batch_size,
-                history_n,
+                history,
                 interrupted,
                 save,
             )

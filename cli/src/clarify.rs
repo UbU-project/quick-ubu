@@ -474,7 +474,7 @@ fn generate_session_round<T: ollama_planner::LlmTransport>(
     task_id: ubu_core::Id,
     transport: &T,
     round_cap: u32,
-    history_n: usize,
+    history: &[ubu_core::CompletedExample],
 ) -> Result<(bool, usize), String> {
     let task = store
         .tasks
@@ -484,7 +484,7 @@ fn generate_session_round<T: ollama_planner::LlmTransport>(
     let prompt = build_clarify_prompt(
         task,
         &session.accumulated,
-        &ubu_core::recent_completed_examples(store, history_n),
+        history,
     );
     // Parse completely before touching session state.
     let response = parse_clarify_response(&transport.generate(&prompt)?)?;
@@ -511,7 +511,7 @@ pub fn run_clarify_batch<T: ollama_planner::LlmTransport>(
     store: &mut ubu_core::Store,
     transport: &T,
     round_cap: u32,
-    history_n: usize,
+    history: &[ubu_core::CompletedExample],
     interrupted: &std::sync::atomic::AtomicBool,
     save: &mut dyn FnMut(&ubu_core::Store) -> Result<(), String>,
 ) -> crate::batch::BatchOutcome {
@@ -550,7 +550,7 @@ pub fn run_clarify_batch<T: ollama_planner::LlmTransport>(
             check_interrupt(store, interrupted, save)?;
             crate::batch::log_model_tasks(store, "clarify", &[task_id], processed, total)?;
             processed += 1;
-            match generate_session_round(store, task_id, transport, round_cap, history_n) {
+            match generate_session_round(store, task_id, transport, round_cap, history) {
                 Ok((finished, enqueued)) => {
                     finalized += usize::from(finished);
                     queued += enqueued;

@@ -93,7 +93,7 @@ pub fn run_decompose_suggest_batch<T: LlmTransport>(
     transport: &T,
     pass_cap: u32,
     min_minutes: u32,
-    history_n: usize,
+    history: &[ubu_core::CompletedExample],
     interrupted: &std::sync::atomic::AtomicBool,
     save: &mut dyn FnMut(&Store) -> Result<(), String>,
 ) -> crate::batch::BatchOutcome {
@@ -122,7 +122,7 @@ pub fn run_decompose_suggest_batch<T: LlmTransport>(
             check_interrupt(store, interrupted, save)?;
             let prompt = build_decompose_suggest_prompt(
                 &store.tasks[id],
-                &ubu_core::recent_completed_examples(store, history_n),
+                history,
             );
             log_model_tasks(store, "decompose", &[*id], index, eligible.len())?;
             match transport
@@ -308,7 +308,7 @@ pub fn decompose_task<T: LlmTransport, R: DecompositionReviewer>(
     task_id: Id,
     transport: &T,
     reviewer: &mut R,
-    history_n: usize,
+    history: &[ubu_core::CompletedExample],
     now: DateTime<Utc>,
     save: &mut dyn FnMut(&Store) -> Result<(), String>,
 ) -> Result<Option<DecompositionSummary>, String> {
@@ -319,7 +319,7 @@ pub fn decompose_task<T: LlmTransport, R: DecompositionReviewer>(
         .clone();
     let prompt = build_decompose_prompt(
         &parent,
-        &ubu_core::recent_completed_examples(store, history_n),
+        history,
     );
     let proposal = parse_decompose_response(&transport.generate(&prompt)?)?;
     review_and_commit(store, task_id, proposal, reviewer, now, save)
