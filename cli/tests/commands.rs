@@ -2087,7 +2087,7 @@ fn batch_handler_queries_history_once_before_dispatching_operations() {
         fn latest_actual(&self, task_id: Uuid) -> Result<Option<ubu_core::LogEntry>, String> { self.sqlite.latest_actual(task_id) }
         fn completions_in_window(&self, from: chrono::DateTime<chrono::Utc>, to: chrono::DateTime<chrono::Utc>) -> Result<Vec<ubu_core::CompletionFact>, String> { self.sqlite.completions_in_window(from, to) }
         fn recent_completions(&self, limit: usize) -> Result<Vec<ubu_core::CompletionFact>, String> {
-            assert_eq!(limit, 7);
+            assert_eq!(limit, 28);
             self.calls.set(self.calls.get() + 1);
             self.sqlite.recent_completions(limit)
         }

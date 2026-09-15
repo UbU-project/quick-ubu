@@ -312,6 +312,121 @@ mod tests {
         );
     }
 
+    struct HistoryBackend {
+        facts: Vec<CompletionFact>,
+        requests: std::cell::RefCell<Vec<usize>>,
+        error: Option<String>,
+    }
+
+    impl StorageBackend for HistoryBackend {
+        fn load(&self) -> Result<Store, String> {
+            panic!("history must not load the store")
+        }
+        fn save(&self, _: &Store) -> Result<(), String> {
+            panic!("history must not save")
+        }
+        fn append_log(&self, _: &[LogEntry]) -> Result<(), String> {
+            panic!("history must not append")
+        }
+        fn latest_actual(&self, _: Id) -> Result<Option<LogEntry>, String> {
+            panic!("history must not query actuals")
+        }
+        fn completions_in_window(
+            &self,
+            _: DateTime<Utc>,
+            _: DateTime<Utc>,
+        ) -> Result<Vec<CompletionFact>, String> {
+            panic!("history must use the bounded recency query")
+        }
+        fn recent_completions(&self, limit: usize) -> Result<Vec<CompletionFact>, String> {
+            self.requests.borrow_mut().push(limit);
+            match &self.error {
+                Some(error) => Err(error.clone()),
+                None => Ok(self.facts.iter().take(limit).cloned().collect()),
+            }
+        }
+    }
+
+    #[test]
+    fn history_overqueries_once_and_recovers_tagged_examples_behind_untagged_facts() {
+        let mut store = Store::new();
+        let mut facts = Vec::new();
+        // Newest two are untagged, followed by six tagged completions, then more chores.
+        for n in 1..=12 {
+            let id = Uuid::from_u128(n);
+            let mut task = task(id, &format!("Task {n}"), vec![]);
+            task.status = TaskStatus::Done;
+            if (3..=8).contains(&n) {
+                task.tags = vec!["history".into()];
+            }
+            store.upsert_task(task);
+            facts.push(CompletionFact {
+                item_id: id,
+                at: DateTime::from_timestamp(100 - n as i64, 0).unwrap(),
+                actual: None,
+            });
+        }
+        // Demonstrate the old query's starvation before exercising the helper.
+        assert!(ubu_core::recent_completed_examples(&store, &facts[..2], 2).is_empty());
+        let before = store.clone();
+        let backend = HistoryBackend {
+            facts,
+            requests: Default::default(),
+            error: None,
+        };
+        let history = build_history(&backend, &store, 2).unwrap();
+        assert_eq!(*backend.requests.borrow(), vec![8]);
+        assert_eq!(
+            history
+                .iter()
+                .map(|example| example.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Task 3", "Task 4"]
+        );
+        assert!(history[0].completed_at > history[1].completed_at);
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn history_zero_and_overflow_limits_use_a_single_saturating_query() {
+        let mut store = Store::new();
+        let id = Uuid::from_u128(1);
+        let mut task = task(id, "Tagged", vec![]);
+        task.status = TaskStatus::Done;
+        task.tags = vec!["history".into()];
+        store.upsert_task(task);
+        let backend = HistoryBackend {
+            facts: vec![CompletionFact {
+                item_id: id,
+                at: DateTime::from_timestamp(0, 0).unwrap(),
+                actual: None,
+            }],
+            requests: Default::default(),
+            error: None,
+        };
+        assert!(build_history(&backend, &store, 0).unwrap().is_empty());
+        assert_eq!(*backend.requests.borrow(), vec![0]);
+        assert_eq!(
+            build_history(&backend, &store, usize::MAX).unwrap().len(),
+            1
+        );
+        assert_eq!(*backend.requests.borrow(), vec![0, usize::MAX]);
+    }
+
+    #[test]
+    fn history_propagates_query_errors_without_retrying() {
+        let backend = HistoryBackend {
+            facts: vec![],
+            requests: Default::default(),
+            error: Some("injected history failure".into()),
+        };
+        assert_eq!(
+            build_history(&backend, &Store::new(), 2),
+            Err("injected history failure".into())
+        );
+        assert_eq!(*backend.requests.borrow(), vec![8]);
+    }
+
     fn objective(id: Id, title: &str) -> Objective {
         Objective {
             id,

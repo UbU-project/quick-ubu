@@ -544,7 +544,7 @@ fn category_order_history_and_batch_local_indices_are_preserved() {
             actual: None,
         }),
     }]).unwrap();
-    let history = ubu_core::recent_completed_examples(&store, &backend.recent_completions(1).unwrap());
+    let history = crate::persist::build_history(&backend, &store, 1).unwrap();
     let transport = StubTransport::new(vec![tag_reply(1), tag_reply(1)]);
     assert_eq!(
         run_batch(

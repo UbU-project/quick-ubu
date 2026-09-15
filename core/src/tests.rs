@@ -1496,7 +1496,7 @@ fn completed_history_filters_orders_and_uses_latest_log_timestamp() {
         }
     }
     let before = store.clone();
-    let examples = recent_completed_examples(&store, &completions);
+    let examples = recent_completed_examples(&store, &completions, 20);
     assert_eq!(examples.len(), 2);
     for (example, n, seconds) in [(&examples[0], 1, 90), (&examples[1], 2, 80)] {
         let task = &store.tasks[&id(n)];
@@ -1511,9 +1511,10 @@ fn completed_history_filters_orders_and_uses_latest_log_timestamp() {
             }
         );
     }
-    assert_eq!(recent_completed_examples(&store, &completions[..1]), examples[..1]);
-    assert!(recent_completed_examples(&store, &[]).is_empty());
-    assert!(recent_completed_examples(&Store::new(), &completions).is_empty());
+    assert_eq!(recent_completed_examples(&store, &completions, 1), examples[..1]);
+    assert!(recent_completed_examples(&store, &[], 20).is_empty());
+    assert!(recent_completed_examples(&store, &completions, 0).is_empty());
+    assert!(recent_completed_examples(&Store::new(), &completions, 20).is_empty());
     assert_eq!(store, before);
 }
 
@@ -1529,7 +1530,7 @@ fn completed_history_ties_use_task_id_order_and_allow_absent_category() {
         store.upsert_task(task);
         completions.push(crate::CompletionFact { item_id: id(n), at: at(50), actual: None });
     }
-    let examples = recent_completed_examples(&store, &completions);
+    let examples = recent_completed_examples(&store, &completions, 20);
     assert_eq!(
         examples
             .iter()
@@ -1538,4 +1539,5 @@ fn completed_history_ties_use_task_id_order_and_allow_absent_category() {
         vec!["task 1", "task 2"]
     );
     assert!(examples.iter().all(|e| e.category.is_none()));
+    assert_eq!(recent_completed_examples(&store, &completions, 1), examples[..1]);
 }

@@ -1986,7 +1986,7 @@ mod tests {
 
     #[test]
     fn classifiers_pass_bounded_history_to_stubs_without_indexing_completions() {
-        use ubu_core::{recent_completed_examples, ActualStatus, FactKind, LogEntry, LogEntryKind};
+        use ubu_core::{ActualStatus, FactKind, LogEntry, LogEntryKind};
 
         let backend = crate::persist::SqliteBackend::in_memory().unwrap();
         use crate::persist::StorageBackend;
@@ -2007,7 +2007,7 @@ mod tests {
             }]).unwrap();
         }
         for limit in [0, 1, 20] {
-            let history = recent_completed_examples(&store, &backend.recent_completions(limit).unwrap());
+            let history = crate::persist::build_history(&backend, &store, limit).unwrap();
             assert_eq!(history.len(), limit.min(2));
             let selected = active_ids(&store);
             let before = store.clone();
