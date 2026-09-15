@@ -15,8 +15,12 @@ pub struct CompletedExample {
     pub completed_at: DateTime<Utc>,
 }
 
-/// Build tagged examples from the caller's bounded completion query.
-pub fn recent_completed_examples(store: &Store, facts: &[CompletionFact]) -> Vec<CompletedExample> {
+/// Build up to `limit` tagged examples from the caller's bounded completion query.
+pub fn recent_completed_examples(
+    store: &Store,
+    facts: &[CompletionFact],
+    limit: usize,
+) -> Vec<CompletedExample> {
     let mut completions = BTreeMap::new();
     for fact in facts {
         let latest = completions.entry(fact.item_id).or_insert(fact.at);
@@ -40,5 +44,6 @@ pub fn recent_completed_examples(store: &Store, facts: &[CompletionFact]) -> Vec
         .collect();
     // Stable sorting preserves ascending task ID order for tied timestamps.
     examples.sort_by_key(|example| std::cmp::Reverse(example.completed_at));
+    examples.truncate(limit);
     examples
 }
