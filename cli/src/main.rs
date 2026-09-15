@@ -613,7 +613,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 timeout_secs: 300,
                 total_timeout_secs: 1200,
             };
-            let history = ubu_core::recent_completed_examples(&store, &backend.recent_completions(history)?);
+            let history = persist::build_history(backend, &store, history)?;
             let report = clarify::clarify_task(
                 &mut store,
                 task_id,
@@ -660,7 +660,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                     base_url: "http://localhost:11434".into(), model,
                     timeout_secs: 300, total_timeout_secs: 1200,
                 };
-                let history = ubu_core::recent_completed_examples(&store, &backend.recent_completions(history)?);
+                let history = persist::build_history(backend, &store, history)?;
                 decompose::decompose_task(
                     &mut store, task_id, &transport, &mut decompose::EditorReviewer,
                     &history, Utc::now(), &mut |store| backend.save(store),
@@ -719,7 +719,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 timeout_secs: ollama_timeout,
                 total_timeout_secs: ollama_total_timeout,
             };
-            let history = ubu_core::recent_completed_examples(&store, &backend.recent_completions(history)?);
+            let history = persist::build_history(backend, &store, history)?;
             let outcome = batch::run_batch_operations(
                 &mut store,
                 &transport,
@@ -754,7 +754,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 timeout_secs: 300,
                 total_timeout_secs: 1200,
             };
-            let history = ubu_core::recent_completed_examples(&store, &backend.recent_completions(history)?);
+            let history = persist::build_history(backend, &store, history)?;
             let filter = logic::TaskFilter {
                 untagged,
                 category,
@@ -797,7 +797,7 @@ fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String
                 timeout_secs: ollama_timeout,
                 total_timeout_secs: ollama_total_timeout,
             };
-            let history = ubu_core::recent_completed_examples(&store, &backend.recent_completions(history)?);
+            let history = persist::build_history(backend, &store, history)?;
             let filter = logic::TaskFilter {
                 category,
                 tag,

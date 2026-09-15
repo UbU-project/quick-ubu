@@ -23,6 +23,16 @@ pub trait StorageBackend {
     fn recent_completions(&self, limit: usize) -> Result<Vec<CompletionFact>, String>;
 }
 
+/// Query extra facts so recent untagged completions do not exhaust prompt history.
+pub fn build_history(
+    backend: &dyn StorageBackend,
+    store: &Store,
+    limit: usize,
+) -> Result<Vec<ubu_core::CompletedExample>, String> {
+    let facts = backend.recent_completions(limit.saturating_mul(4))?;
+    Ok(ubu_core::recent_completed_examples(store, &facts, limit))
+}
+
 fn completion_fact(entry: &LogEntry) -> Option<CompletionFact> {
     match &entry.kind {
         ubu_core::LogEntryKind::Fact(ubu_core::FactKind::Actual {
