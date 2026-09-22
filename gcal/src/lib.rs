@@ -14,7 +14,7 @@ use yup_oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};
 
 const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar";
 const CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3/calendars";
-const CAPTURE_NAMESPACE: Id = Id::from_u128(0xfbb8_2411_158b_4a86_9f69_42d19fec7587);
+pub const CAPTURE_NAMESPACE: Id = Id::from_u128(0xfbb8_2411_158b_4a86_9f69_42d19fec7587);
 
 /// category -> Google event colorId, matching the operator's legacy scheme.
 pub fn default_category_colors() -> BTreeMap<String, String> {

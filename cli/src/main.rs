@@ -61,6 +61,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Export a store and task origins for mainline import.
+    Snapshot { path: PathBuf, #[arg(long)] from_json: Option<PathBuf> },
     Add(AddArgs),
     List,
     Done { prefix: String },
@@ -412,8 +414,18 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<u8, String> {
+    if let Command::Snapshot { path, from_json: Some(input) } = &cli.command {
+        return write_snapshot(path, &persist::load(input)?);
+    }
     let backend = SqliteBackend::open(&cli.store)?;
     run_with_backend(cli, &backend)
+}
+
+fn write_snapshot(path: &Path, store: &ubu_core::Store) -> Result<u8, String> {
+    let snapshot = serde_json::json!({"snapshot_version": 1, "store": store,
+        "task_origins": ubu_core::routine::task_origins(store, gcal::CAPTURE_NAMESPACE)});
+    persist::save_json(path, serde_json::to_string_pretty(&snapshot))?;
+    Ok(0)
 }
 
 fn print_classifier_report(report: &logic::BatchReport) {
@@ -428,9 +440,13 @@ fn print_classifier_report(report: &logic::BatchReport) {
 }
 
 fn run_with_backend(cli: Cli, backend: &dyn StorageBackend) -> Result<u8, String> {
-    let mut store = backend.load()?;
+    let mut store = match &cli.command {
+        Command::Snapshot { from_json: Some(input), .. } => persist::load(input)?,
+        _ => backend.load()?,
+    };
 
     match cli.command {
+        Command::Snapshot { path, .. } => { write_snapshot(&path, &store)?; },
         Command::Add(args) => {
             let id = logic::add(
                 &mut store,

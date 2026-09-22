@@ -1,6 +1,6 @@
 //! Pure recurrence expansion into deterministic pinned tasks.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{Datelike, Days, Duration, NaiveDate, NaiveTime, TimeZone, Utc, Weekday, WeekdaySet};
 pub use chrono_tz::Tz;
@@ -13,6 +13,38 @@ use crate::types::{
 };
 
 const NAMESPACE: Uuid = Uuid::from_u128(0x6f51_89f1_6208_5c1e_a8ec_15c0f894ea9d);
+
+pub fn occurrence_id(template_id: Id, date: NaiveDate) -> Id {
+    Uuid::new_v5(&NAMESPACE, format!("{template_id}|{date}").as_bytes())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOrigin { RoutineOccurrence, CalendarCapture, OrphanedRoutineOccurrence, Manual }
+
+pub fn task_origins(store: &Store, capture_namespace: Id) -> BTreeMap<Id, TaskOrigin> {
+    let dates: Vec<_> = store.tasks.values().flat_map(|task| {
+        task.pinned.iter().flat_map(|w| [w.start, w.end])
+            .chain(task.earliest_start).chain(task.must_finish_by)
+    }).map(|time| time.date_naive()).collect();
+    let mut routine_ids = BTreeSet::new();
+    if let (Some(first), Some(last)) = (dates.iter().min(), dates.iter().max()) {
+        let mut day = first.pred_opt().unwrap_or(*first);
+        let last = last.succ_opt().unwrap_or(*last);
+        loop {
+            for template in store.routines.values() { routine_ids.insert(occurrence_id(template.id, day)); }
+            if day == last { break; }
+            let Some(next) = day.succ_opt() else { break; }; day = next;
+        }
+    }
+    store.tasks.keys().map(|&id| {
+        let origin = if routine_ids.contains(&id) { TaskOrigin::RoutineOccurrence }
+            else if store.calendar_links.get(&id).is_some_and(|event| Uuid::new_v5(&capture_namespace, event.as_bytes()) == id) { TaskOrigin::CalendarCapture }
+            else if id.get_version_num() == 5 { TaskOrigin::OrphanedRoutineOccurrence }
+            else { TaskOrigin::Manual };
+        (id, origin)
+    }).collect()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Recurrence {
@@ -163,7 +195,7 @@ pub fn expand_routine(
                     None,
                 )
             };
-            let id = Uuid::new_v5(&NAMESPACE, format!("{}|{}", template.id, date).as_bytes());
+            let id = occurrence_id(template.id, date);
 
             tasks.push(Task {
                 id,
@@ -185,10 +217,7 @@ pub fn expand_routine(
                     .after
                     .iter()
                     .map(|reference| AfterConstraint {
-                        task_id: Uuid::new_v5(
-                            &NAMESPACE,
-                            format!("{}|{}", reference.template_id, date).as_bytes(),
-                        ),
+                        task_id: occurrence_id(reference.template_id, date),
                         offset: reference.offset,
                     })
                     .collect(),

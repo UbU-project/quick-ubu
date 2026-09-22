@@ -2098,3 +2098,41 @@ fn batch_handler_queries_history_once_before_dispatching_operations() {
     assert_eq!(crate::run_with_backend(command, &backend).unwrap(), 0);
     assert_eq!(backend.calls.get(), 1);
 }
+
+#[test]
+fn snapshot_classifies_generated_orphan_capture_and_manual_and_reads_legacy() {
+    let (directory, path) = memory_store();
+    let routines = vec![RoutineTemplate {
+        id: Uuid::new_v4(), title: "Synthetic routine".into(), tier: Tier::UserShared,
+        start_time: NaiveTime::from_hms_opt(23, 30, 0).unwrap(), duration: Duration::minutes(5),
+        affect_cost: 0, category: None, transparent: false, reminders: vec![], after: vec![],
+        dynamic: false, latest_tod: None, recurrence: Recurrence::Daily,
+    }];
+    let input = directory.join("routines.json");
+    fs::write(&input, serde_json::to_string(&routines).unwrap()).unwrap();
+    assert_success(&quick_ubu(&path, &["routine-import", input.to_str().unwrap()]));
+    assert_success(&quick_ubu(&path, &["generate", "--from", "2026-09-22", "--days", "2", "--tz", "America/New_York"]));
+    let output = directory.join("snapshot.json");
+    assert_success(&quick_ubu(&path, &["snapshot", output.to_str().unwrap()]));
+    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&output).unwrap()).unwrap();
+    assert_eq!(value["snapshot_version"], 1);
+    let mut loaded = crate::persist::load(&path).unwrap();
+    assert_eq!(serde_json::from_value::<Store>(value["store"].clone()).unwrap(), loaded);
+    assert_eq!(value["task_origins"].as_object().unwrap().len(), loaded.tasks.len());
+    assert!(value["task_origins"].as_object().unwrap().values().all(|v| v == "routine_occurrence"));
+    loaded.routines.clear();
+    let mut manual = loaded.tasks.values().next().unwrap().clone();
+    manual.id = Uuid::new_v4(); let manual_id = manual.id;
+    loaded.upsert_task(manual.clone());
+    let capture_id = Uuid::new_v5(&gcal::CAPTURE_NAMESPACE, b"synthetic-event");
+    manual.id = capture_id; loaded.upsert_task(manual);
+    loaded.calendar_links.insert(capture_id, "synthetic-event".into());
+    let legacy = directory.join("legacy.json");
+    fs::write(&legacy, serde_json::to_string(&loaded).unwrap()).unwrap();
+    assert_success(&quick_ubu(&path, &["snapshot", output.to_str().unwrap(), "--from-json", legacy.to_str().unwrap()]));
+    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
+    assert_eq!(serde_json::from_value::<Store>(value["store"].clone()).unwrap(), loaded);
+    for id in loaded.tasks.keys() {
+        assert_eq!(value["task_origins"][id.to_string()], if *id == manual_id { "manual" } else if *id == capture_id { "calendar_capture" } else { "orphaned_routine_occurrence" });
+    }
+}

@@ -183,7 +183,7 @@ pub fn save(path: &Path, store: &Store) -> Result<(), String> {
     save_json(path, serde_json::to_string_pretty(store))
 }
 
-fn save_json(path: &Path, contents: Result<String, serde_json::Error>) -> Result<(), String> {
+pub(crate) fn save_json(path: &Path, contents: Result<String, serde_json::Error>) -> Result<(), String> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
