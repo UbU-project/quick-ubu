@@ -2136,3 +2136,40 @@ fn snapshot_classifies_generated_orphan_capture_and_manual_and_reads_legacy() {
         assert_eq!(value["task_origins"][id.to_string()], if *id == manual_id { "manual" } else if *id == capture_id { "calendar_capture" } else { "orphaned_routine_occurrence" });
     }
 }
+
+#[test]
+fn routine_import_then_snapshot_preserves_after_maximum() {
+    let (directory, path) = memory_store();
+    let predecessor = Uuid::new_v4();
+    let successor = Uuid::new_v4();
+    let input = directory.join("routine.json");
+    let routine = RoutineTemplate {
+        id: successor,
+        title: "Synthetic bounded successor".into(),
+        tier: Tier::UserShared,
+        start_time: NaiveTime::from_hms_opt(21, 1, 0).unwrap(),
+        duration: Duration::minutes(30),
+        affect_cost: 0,
+        category: None,
+        transparent: false,
+        reminders: vec![],
+        after: vec![],
+        dynamic: true,
+        latest_tod: Some(NaiveTime::from_hms_opt(23, 59, 0).unwrap()),
+        recurrence: Recurrence::Daily,
+    };
+    let mut value = serde_json::to_value(vec![routine]).unwrap();
+    value[0]["after"] = serde_json::json!([{
+        "template_id": predecessor, "offset": [0, 0], "maximum": [600, 0]
+    }]);
+    fs::write(&input, serde_json::to_string(&value).unwrap()).unwrap();
+    assert_success(&quick_ubu(&path, &["routine-import", input.to_str().unwrap()]));
+    let output = directory.join("snapshot.json");
+    assert_success(&quick_ubu(&path, &["snapshot", output.to_str().unwrap()]));
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
+    let after = &snapshot["store"]["routines"][successor.to_string()]["after"];
+    assert_eq!(after[0]["maximum"], serde_json::json!([600, 0]));
+    assert_eq!(after[0]["offset"], serde_json::json!([0, 0]));
+    println!("P1B24_QUICK_MAXIMUM {}", after[0]["maximum"]);
+}

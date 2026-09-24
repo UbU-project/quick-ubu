@@ -86,6 +86,8 @@ where
 pub struct RoutineAfter {
     pub template_id: Id,
     pub offset: Duration,
+    #[serde(default)]
+    pub maximum: Option<Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -415,6 +417,7 @@ mod tests {
             second.latest_tod = Some(time(10, 0));
             second.after.push(RoutineAfter {
                 template_id: first.id,
+                maximum: None,
                 offset,
             });
             let mut store = Store::new();
@@ -522,6 +525,7 @@ mod tests {
         let mut second = template(2, Recurrence::Daily);
         second.after.push(RoutineAfter {
             template_id: first.id,
+            maximum: None,
             offset: Duration::hours(1),
         });
         let tasks = expand_routine(
@@ -558,6 +562,7 @@ mod tests {
         second.dynamic = true;
         second.after.push(RoutineAfter {
             template_id: first.id,
+            maximum: None,
             offset: Duration::minutes(60),
         });
         let mut tasks = expand_routine(&[first, second], date(2026, 9, 1), 1, chrono_tz::UTC);

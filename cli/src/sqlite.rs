@@ -464,6 +464,7 @@ mod tests {
             routine.latest_tod = Some(chrono::NaiveTime::from_hms_opt(20, 0, 0).unwrap());
             routine.after.push(ubu_core::RoutineAfter {
                 template_id: id(999),
+                maximum: None,
                 offset: Duration::minutes(30),
             });
             store.routines.insert(routine.id, routine);
