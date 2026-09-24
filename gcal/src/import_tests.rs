@@ -12,6 +12,8 @@ fn linked_store() -> Store {
 async fn confirmed_deleted_pinned_instance_is_removed_without_changing_its_routine() {
     let mut store = Store::new();
     let routine = ubu_core::RoutineTemplate {
+        establishes: Vec::new(),
+        requires: Vec::new(),
         id: id(10),
         title: "Daily".into(),
         tier: Tier::UserShared,

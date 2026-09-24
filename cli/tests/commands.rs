@@ -900,6 +900,8 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
     let import_path = directory.join("routines.json");
     let routines = vec![
         RoutineTemplate {
+            establishes: Vec::new(),
+            requires: Vec::new(),
             id: Uuid::from_u128(1),
             title: "Morning focus".to_string(),
             tier: Tier::UserShared,
@@ -915,6 +917,8 @@ fn routine_import_list_and_generate_complete_the_cli_flow() {
             recurrence: Recurrence::Daily,
         },
         RoutineTemplate {
+            establishes: Vec::new(),
+            requires: Vec::new(),
             id: Uuid::from_u128(2),
             title: "Pay bills".to_string(),
             tier: Tier::SemiPublic,
@@ -1023,6 +1027,8 @@ fn generate_daily_routines_uses_all_requested_local_dates_after_release() {
         ),
     ] {
         store.upsert_routine(RoutineTemplate {
+            establishes: Vec::new(),
+            requires: Vec::new(),
             id: Uuid::from_u128(id),
             title: format!("routine-{id}"),
             tier: Tier::UserShared,
@@ -2103,6 +2109,8 @@ fn batch_handler_queries_history_once_before_dispatching_operations() {
 fn snapshot_classifies_generated_orphan_capture_and_manual_and_reads_legacy() {
     let (directory, path) = memory_store();
     let routines = vec![RoutineTemplate {
+        establishes: Vec::new(),
+        requires: Vec::new(),
         id: Uuid::new_v4(), title: "Synthetic routine".into(), tier: Tier::UserShared,
         start_time: NaiveTime::from_hms_opt(23, 30, 0).unwrap(), duration: Duration::minutes(5),
         affect_cost: 0, category: None, transparent: false, reminders: vec![], after: vec![],
@@ -2144,6 +2152,8 @@ fn routine_import_then_snapshot_preserves_after_maximum() {
     let successor = Uuid::new_v4();
     let input = directory.join("routine.json");
     let routine = RoutineTemplate {
+        establishes: Vec::new(),
+        requires: Vec::new(),
         id: successor,
         title: "Synthetic bounded successor".into(),
         tier: Tier::UserShared,
@@ -2172,4 +2182,33 @@ fn routine_import_then_snapshot_preserves_after_maximum() {
     assert_eq!(after[0]["maximum"], serde_json::json!([600, 0]));
     assert_eq!(after[0]["offset"], serde_json::json!([0, 0]));
     println!("P1B24_QUICK_MAXIMUM {}", after[0]["maximum"]);
+}
+
+#[test]
+fn routine_import_then_snapshot_preserves_declared_requirements() {
+    let (directory, path) = memory_store();
+    let id = Uuid::new_v4();
+    let input = directory.join("routine.json");
+    let routine = serde_json::json!({
+        "id": id, "title": "Synthetic brush", "tier": "UserShared",
+        "start_time": "22:00:00", "duration": [300, 0], "affect_cost": 0,
+        "recurrence": "Daily", "dynamic": true, "latest_tod": "23:00:00",
+        "establishes": ["facts.teeth_clean"],
+        "requires": [
+            {"fact": "facts.fed", "maximum": [14400, 0]},
+            {"fact": "facts.ready", "offset": [60, 0], "maximum": [600, 0]}
+        ]
+    });
+    fs::write(&input, serde_json::to_string(&vec![routine]).unwrap()).unwrap();
+    assert_success(&quick_ubu(&path, &["routine-import", input.to_str().unwrap()]));
+    let output = directory.join("snapshot.json");
+    assert_success(&quick_ubu(&path, &["snapshot", output.to_str().unwrap()]));
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
+    let stored = &snapshot["store"]["routines"][id.to_string()];
+    assert_eq!(stored["establishes"], serde_json::json!(["facts.teeth_clean"]));
+    assert_eq!(stored["requires"], serde_json::json!([
+        {"fact":"facts.fed","offset":null,"maximum":[14400,0]},
+        {"fact":"facts.ready","offset":[60,0],"maximum":[600,0]}
+    ]));
 }

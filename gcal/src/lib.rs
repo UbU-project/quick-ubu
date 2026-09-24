@@ -1226,6 +1226,8 @@ mod stub_tests {
     #[tokio::test]
     async fn routine_reminders_flow_through_generation_and_export_create_update_and_clear() {
         let routine = ubu_core::RoutineTemplate {
+            establishes: Vec::new(),
+            requires: Vec::new(),
             id: id(90),
             title: "Daily reminder".to_string(),
             tier: Tier::UserShared,

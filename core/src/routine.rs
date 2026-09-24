@@ -91,6 +91,17 @@ pub struct RoutineAfter {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutineRequirement {
+    pub fact: String,
+    /// Earliest start after the establisher's end. Defaults to zero.
+    #[serde(default)]
+    pub offset: Option<Duration>,
+    /// Latest start after the same point. Absent means unbounded.
+    #[serde(default)]
+    pub maximum: Option<Duration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutineTemplate {
     pub id: Id,
     pub title: String,
@@ -120,6 +131,13 @@ pub struct RoutineTemplate {
     pub recurrence: Recurrence,
     #[serde(default)]
     pub after: Vec<RoutineAfter>,
+    /// UniverseState targets this routine establishes when an occurrence completes.
+    #[serde(default)]
+    pub establishes: Vec<String>,
+    /// Targets this routine needs established before it runs. Each resolves, on
+    /// import, to an `after` edge on whichever routine establishes it.
+    #[serde(default)]
+    pub requires: Vec<RoutineRequirement>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +334,8 @@ mod tests {
 
     fn template(value: u128, recurrence: Recurrence) -> RoutineTemplate {
         RoutineTemplate {
+            establishes: Vec::new(),
+            requires: Vec::new(),
             id: id(value),
             title: format!("routine-{value}"),
             tier: Tier::UserShared,

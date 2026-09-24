@@ -600,6 +600,8 @@ fn automatic_selection_skips_generated_fixed_routines_and_selects_dynamic_tasks(
 
     let now = history()[0].completed_at;
     let template = RoutineTemplate {
+        establishes: Vec::new(),
+        requires: Vec::new(),
         id: Id::from_u128(100),
         title: "Fixed routine".into(),
         tier: Tier::UserShared,
