@@ -99,6 +99,9 @@ pub struct RoutineRequirement {
     /// Latest start after the same point. Absent means unbounded.
     #[serde(default)]
     pub maximum: Option<Duration>,
+    /// On import, opt in to checking this target when a mainline Plan is built.
+    #[serde(default)]
+    pub verify: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

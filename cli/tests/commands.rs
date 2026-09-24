@@ -2196,7 +2196,7 @@ fn routine_import_then_snapshot_preserves_declared_requirements() {
         "establishes": ["facts.teeth_clean"],
         "requires": [
             {"fact": "facts.fed", "maximum": [14400, 0]},
-            {"fact": "facts.ready", "offset": [60, 0], "maximum": [600, 0]}
+            {"fact": "facts.ready", "offset": [60, 0], "maximum": [600, 0], "verify": true}
         ]
     });
     fs::write(&input, serde_json::to_string(&vec![routine]).unwrap()).unwrap();
@@ -2208,7 +2208,7 @@ fn routine_import_then_snapshot_preserves_declared_requirements() {
     let stored = &snapshot["store"]["routines"][id.to_string()];
     assert_eq!(stored["establishes"], serde_json::json!(["facts.teeth_clean"]));
     assert_eq!(stored["requires"], serde_json::json!([
-        {"fact":"facts.fed","offset":null,"maximum":[14400,0]},
-        {"fact":"facts.ready","offset":[60,0],"maximum":[600,0]}
+        {"fact":"facts.fed","offset":null,"maximum":[14400,0],"verify":false},
+        {"fact":"facts.ready","offset":[60,0],"maximum":[600,0],"verify":true}
     ]));
 }
